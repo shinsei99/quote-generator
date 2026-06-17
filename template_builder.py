@@ -281,28 +281,9 @@ def _build_render_lines(items: list[dict]) -> tuple[list[dict], int]:
     return lines, subtotal
 
 
-def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
-                   tax_rate: float, template_path: Path | None = None,
-                   document_type: str | None = None, bank_info: str = "") -> bytes:
-    """items: [{"種別","品名","規格","数量","単位","上乗せ後単価"}]（税別）を
-    template に流し込み、小計・消費税（小数点以下切り捨て）・合計まで計算して
-    bytes を返す。「種別」が"工事区分"の行は品名のみの見出し行として出力され、
-    元の見積書が工事箇所ごとに分かれている場合はその区切りで小計が入る。
-
-    document_type で "見積書"（既定）か "請求書" のどちらのシートに書き込むか
-    を選べる。請求書の場合は bank_info（振込先）も書き込む。
-
-    出力行数（見出し・小計を含む）があらかじめ用意された行数（MAX_DATA_ROWS）
-    を超える場合は、小計・消費税・合計欄（請求書では振込先欄も）を必要な分
-    だけ下にずらして衝突を避ける。
-    """
-    document_type = document_type or cfg.SHEET_NAME
-    is_invoice = document_type == cfg.INVOICE_SHEET_NAME
-
-    template_path = Path(template_path) if template_path else Path(cfg.TEMPLATE_PATH)
-    wb = load_workbook(template_path)
-    ws = wb[document_type] if document_type in wb.sheetnames else wb.active
-
+def _fill_sheet(ws, items: list[dict], header_info: dict, issuer_info: dict,
+                 tax_rate: float, is_invoice: bool, bank_info: str = ""):
+    """1枚のシート（見積書 または 請求書）にデータを流し込む共通処理。"""
     if header_info.get("client"):
         ws[cfg.CELL_CLIENT] = header_info["client"]
     if header_info.get("issue_date"):
@@ -380,6 +361,45 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
 
     if is_invoice and bank_info:
         ws[f"{cfg.CELL_BANK_INFO_COL_START}{bank_row}"] = bank_info
+
+
+def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
+                   tax_rate: float, template_path: Path | None = None,
+                   document_type: str | None = None, bank_info: str = "") -> bytes:
+    """items: [{"種別","品名","規格","数量","単位","上乗せ後単価"}]（税別）を
+    template の1シートに流し込み、bytes を返す（見積書のみ／請求書のみが
+    必要な場合に使う。両方まとめて1冊にしたい場合は fill_combined_document
+    を使う）。
+    """
+    document_type = document_type or cfg.SHEET_NAME
+    is_invoice = document_type == cfg.INVOICE_SHEET_NAME
+
+    template_path = Path(template_path) if template_path else Path(cfg.TEMPLATE_PATH)
+    wb = load_workbook(template_path)
+    ws = wb[document_type] if document_type in wb.sheetnames else wb.active
+
+    _fill_sheet(ws, items, header_info, issuer_info, tax_rate, is_invoice, bank_info)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def fill_combined_document(items: list[dict], header_info: dict, issuer_info: dict,
+                            tax_rate: float, template_path: Path | None = None,
+                            bank_info: str = "") -> bytes:
+    """同じ品目・税率から「見積書」「請求書」両方のシートを1冊のExcelに
+    まとめて出力する（1回のダウンロードで両方そろう）。
+    """
+    template_path = Path(template_path) if template_path else Path(cfg.TEMPLATE_PATH)
+    wb = load_workbook(template_path)
+
+    quote_ws = wb[cfg.SHEET_NAME] if cfg.SHEET_NAME in wb.sheetnames else wb.active
+    _fill_sheet(quote_ws, items, header_info, issuer_info, tax_rate, is_invoice=False)
+
+    if cfg.INVOICE_SHEET_NAME in wb.sheetnames:
+        invoice_ws = wb[cfg.INVOICE_SHEET_NAME]
+        _fill_sheet(invoice_ws, items, header_info, issuer_info, tax_rate, is_invoice=True, bank_info=bank_info)
 
     buf = io.BytesIO()
     wb.save(buf)

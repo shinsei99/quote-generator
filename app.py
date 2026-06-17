@@ -6,8 +6,8 @@ import pandas as pd
 import streamlit as st
 
 import template_config as cfg
-from parsing import extract_items_from_excel, extract_items_from_pdf
-from template_builder import ensure_template_exists, fill_template
+from parsing import ClaudeExtractionError, extract_items_from_excel, extract_items_from_pdf
+from template_builder import ensure_template_exists, fill_combined_document
 
 st.set_page_config(page_title="見積書自動生成ツール", page_icon="🧾", layout="wide")
 
@@ -35,27 +35,6 @@ def save_issuer(data: dict):
     df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
     df.to_csv(ISSUERS_CSV, index=False)
 
-
-TERMS_CSV = DATA_DIR / "term_corrections.csv"
-
-
-def load_term_corrections() -> pd.DataFrame:
-    if TERMS_CSV.exists():
-        return pd.read_csv(TERMS_CSV, dtype=str).fillna("")
-    return pd.DataFrame(columns=["wrong", "correct"])
-
-
-def save_term_correction(wrong: str, correct: str):
-    df = load_term_corrections()
-    df = df[df["wrong"] != wrong]
-    df = pd.concat([df, pd.DataFrame([{"wrong": wrong, "correct": correct}])], ignore_index=True)
-    df.to_csv(TERMS_CSV, index=False)
-
-
-def delete_term_correction(wrong: str):
-    df = load_term_corrections()
-    df = df[df["wrong"] != wrong]
-    df.to_csv(TERMS_CSV, index=False)
 
 st.markdown(
     """
@@ -90,11 +69,13 @@ uploaded = st.file_uploader("見積書をアップロード（PDF または Exce
 
 if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name:
     file_bytes = uploaded.read()
+    items, method = [], ""
     if uploaded.name.lower().endswith(".pdf"):
-        terms_df = load_term_corrections()
-        custom_corrections = dict(zip(terms_df["wrong"], terms_df["correct"]))
-        with st.spinner("PDFを解析しています…（スキャン画像の場合はOCRのため時間がかかることがあります）"):
-            items, method = extract_items_from_pdf(file_bytes, custom_corrections)
+        with st.spinner("Claude Codeが見積書PDFを読み解いています…（数十秒かかります）"):
+            try:
+                items, method = extract_items_from_pdf(file_bytes)
+            except ClaudeExtractionError as e:
+                st.error(f"PDFの解析に失敗しました: {e}")
     else:
         with st.spinner("Excelを解析しています…"):
             items = extract_items_from_excel(file_bytes)
@@ -173,34 +154,6 @@ edited_df = st.data_editor(
     key="items_editor",
 )
 st.session_state.items_df = edited_df
-
-with st.expander("📖 OCR誤字修正辞書（リフォーム用語）"):
-    st.caption(
-        "上の表で品名を手直ししたら、ここに「誤った表記」と「正しい表記」を登録してください。"
-        "次回以降、スキャンPDFのOCR読み取り結果に自動で反映されます（PDF表形式抽出・Excel読み込みには影響しません）。"
-    )
-    terms_df = load_term_corrections()
-    if not terms_df.empty:
-        for _, row in terms_df.iterrows():
-            tc1, tc2, tc3 = st.columns([3, 3, 1])
-            tc1.write(row["wrong"])
-            tc2.write(f"→ {row['correct']}")
-            if tc3.button("削除", key=f"del_term_{row['wrong']}"):
-                delete_term_correction(row["wrong"])
-                st.rerun()
-    else:
-        st.caption("登録済みの辞書はまだありません。")
-
-    nt1, nt2, nt3 = st.columns([3, 3, 1])
-    new_wrong = nt1.text_input("誤った表記", key="new_term_wrong", placeholder="例：加ス鮎替")
-    new_correct = nt2.text_input("正しい表記", key="new_term_correct", placeholder="例：クロス貼替")
-    if nt3.button("登録", key="add_term_btn"):
-        if not new_wrong.strip() or not new_correct.strip():
-            st.error("両方とも入力してください")
-        else:
-            save_term_correction(new_wrong.strip(), new_correct.strip())
-            st.success(f"「{new_wrong}」→「{new_correct}」を登録しました")
-            st.rerun()
 
 st.divider()
 
@@ -341,11 +294,7 @@ if st.button("💾 この発行元情報を保存"):
 st.divider()
 
 if calc_df.empty:
-    dl1, dl2 = st.columns(2)
-    with dl1:
-        st.button("📥 見積書をダウンロード", disabled=True, use_container_width=True)
-    with dl2:
-        st.button("🧾 請求書をダウンロード", disabled=True, use_container_width=True)
+    st.button("📥 見積書・請求書をダウンロード（1冊にまとめて）", disabled=True, use_container_width=True)
 else:
     items_payload = calc_df[["種別", "品名", "規格", "数量", "単位", "上乗せ後単価"]].to_dict("records")
     header_info = {
@@ -361,29 +310,16 @@ else:
         "license": issuer_license,
     }
 
-    dl1, dl2 = st.columns(2)
-    with dl1:
-        quote_bytes = fill_template(
-            items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH,
-            document_type=cfg.SHEET_NAME,
-        )
-        st.download_button(
-            "📥 見積書をダウンロード",
-            data=quote_bytes,
-            file_name=f"見積書_{datetime.date.today().isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True,
-        )
-    with dl2:
-        invoice_bytes = fill_template(
-            items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH,
-            document_type=cfg.INVOICE_SHEET_NAME, bank_info=issuer_bank_info,
-        )
-        st.download_button(
-            "🧾 請求書をダウンロード",
-            data=invoice_bytes,
-            file_name=f"請求書_{datetime.date.today().isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+    combined_bytes = fill_combined_document(
+        items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH,
+        bank_info=issuer_bank_info,
+    )
+    st.download_button(
+        "📥 見積書・請求書をダウンロード（1冊にまとめて）",
+        data=combined_bytes,
+        file_name=f"見積書_請求書_{datetime.date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+        help="「見積書」「請求書」の2シートが1冊のExcelファイルに入っています",
+    )
