@@ -18,6 +18,7 @@ from openpyxl import load_workbook
 ITEM_NAME_KEYWORDS = ["品名", "品目", "名称", "商品名", "item", "description"]
 QTY_KEYWORDS = ["数量", "個数", "qty", "quantity"]
 UNIT_KEYWORDS = ["単位", "unit"]
+SPEC_KEYWORDS = ["規格", "仕様", "寸法", "spec"]
 PRICE_KEYWORDS = ["単価", "価格", "unit price", "price"]
 AMOUNT_KEYWORDS = ["金額", "amount", "total"]
 
@@ -69,17 +70,33 @@ def find_col(header_texts: list[str], keywords: list[str]) -> int | None:
     return None
 
 
-# 品目ではなく、小計/合計などの集計行・見出し行とみなして除外する品名キーワード
-_NON_ITEM_NAME_MARKERS = ("小計", "合計", "【", "】")
+# 「小計」「合計」などの集計行とみなすキーワード（実際の金額は新しい上乗せ率
+# で再計算するため、元の数字は使わず「ここでグループを区切る」印として扱う）
+_SUBTOTAL_MARKERS = ("小計", "合計", "【", "】")
+# 品目表の中に現れる、品目でも区切りでもない行（ページ送り表記など）
+_IGNORE_MARKERS = ("次頁", "前頁")
 
 
 def parse_table(table: list[list]) -> list[dict]:
+    """テーブルを解析し、品目に加えて「工事区分」の見出し行・グループの
+    区切り（元の【小計】の位置）も種別付きで返す。
+
+    元の見積書が工事箇所ごとに見出し＋小計で区切られている場合、その構造を
+    できるだけ保つため、
+      - 数量・単価・金額がすべて空の行 → 「工事区分」の見出し
+      - 「小計」「合計」を含む行 → 「区切り」（その時点までの品目で
+        小計を作る合図。名前付きの見出しが無くても区切りだけのグループに
+        なる場合がある＝単独項目だけのグループなど、業者によって書き方が
+        違うケースに対応するため）
+    として扱う。
+    """
     if not table or len(table) < 2:
         return []
     header = [str(c or "").strip() for c in table[0]]
     col_name = find_col(header, ITEM_NAME_KEYWORDS)
     col_qty = find_col(header, QTY_KEYWORDS)
     col_unit = find_col(header, UNIT_KEYWORDS)
+    col_spec = find_col(header, SPEC_KEYWORDS)
     col_price = find_col(header, PRICE_KEYWORDS)
     col_amount = find_col(header, AMOUNT_KEYWORDS)
     if col_name is None or (col_qty is None and col_price is None and col_amount is None):
@@ -90,16 +107,21 @@ def parse_table(table: list[list]) -> list[dict]:
         if col_name >= len(row):
             continue
         name = str(row[col_name] or "").strip()
-        if not name or any(m in name for m in _NON_ITEM_NAME_MARKERS):
+        if not name or any(m in name for m in _IGNORE_MARKERS):
+            continue
+        if any(m in name for m in _SUBTOTAL_MARKERS):
+            rows.append({"種別": "小計区切り"})
             continue
 
         qty = to_number(row[col_qty]) if col_qty is not None and col_qty < len(row) else None
         unit = str(row[col_unit] or "").strip() if col_unit is not None and col_unit < len(row) else ""
+        spec = str(row[col_spec] or "").strip() if col_spec is not None and col_spec < len(row) else ""
         price = to_number(row[col_price]) if col_price is not None and col_price < len(row) else None
         amount = to_number(row[col_amount]) if col_amount is not None and col_amount < len(row) else None
 
         if qty is None and price is None and amount is None:
-            # 数量・単価・金額がすべて空＝小見出しなどの情報行なのでスキップ
+            # 数量・単価・金額がすべて空＝工事区分の見出し行
+            rows.append({"種別": "工事区分", "品名": name})
             continue
 
         eff_qty = qty if qty else 1
@@ -112,7 +134,10 @@ def parse_table(table: list[list]) -> list[dict]:
         else:
             continue
 
-        rows.append({"品名": name, "数量": eff_qty, "単位": unit, "元単価": round(eff_price, 2)})
+        rows.append({
+            "種別": "品目", "品名": name, "規格": spec, "単位": unit,
+            "数量": eff_qty, "元単価": round(eff_price, 2),
+        })
     return rows
 
 
@@ -142,7 +167,7 @@ def parse_line_to_item(line: str) -> dict | None:
     if price <= 0:
         return None
 
-    return {"品名": name, "数量": qty if qty > 0 else 1, "単位": "", "元単価": price}
+    return {"種別": "品目", "品名": name, "規格": "", "数量": qty if qty > 0 else 1, "単位": "", "元単価": price}
 
 
 def extract_table_items_from_pdf(file_bytes: bytes) -> list[dict]:
@@ -264,19 +289,25 @@ def extract_items_from_excel(file_bytes: bytes) -> list[dict]:
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
 
-    header_idx = col_name = col_qty = col_unit = col_price = None
+    header_idx = col_name = col_qty = col_unit = col_spec = col_price = None
     for i, row in enumerate(rows[:15]):
         texts = [str(c).strip() if c is not None else "" for c in row]
         cn = find_col(texts, ITEM_NAME_KEYWORDS)
         cq = find_col(texts, QTY_KEYWORDS)
         cu = find_col(texts, UNIT_KEYWORDS)
+        cs = find_col(texts, SPEC_KEYWORDS)
         cp = find_col(texts, PRICE_KEYWORDS)
         if cn is not None and (cq is not None or cp is not None):
-            header_idx, col_name, col_qty, col_unit, col_price = i, cn, cq, cu, cp
+            header_idx, col_name, col_qty, col_unit, col_spec, col_price = i, cn, cq, cu, cs, cp
             break
 
     if header_idx is None:
         return []
+
+    def _cell_text(row, col):
+        if col is None or col >= len(row) or row[col] is None:
+            return ""
+        return str(row[col]).strip()
 
     items = []
     for row in rows[header_idx + 1:]:
@@ -286,12 +317,13 @@ def extract_items_from_excel(file_bytes: bytes) -> list[dict]:
         if name is None or str(name).strip() == "":
             continue
         qty = to_number(row[col_qty]) if col_qty is not None and col_qty < len(row) else None
-        unit = str(row[col_unit]).strip() if col_unit is not None and col_unit < len(row) and row[col_unit] is not None else ""
         price = to_number(row[col_price]) if col_price is not None and col_price < len(row) else None
         items.append({
+            "種別": "品目",
             "品名": str(name).strip(),
+            "規格": _cell_text(row, col_spec),
+            "単位": _cell_text(row, col_unit),
             "数量": qty if qty is not None else 1,
-            "単位": unit,
             "元単価": price if price is not None else 0,
         })
     return items

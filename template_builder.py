@@ -193,13 +193,74 @@ def ensure_template_exists(path: Path | None = None) -> Path:
     return path
 
 
+def _build_render_lines(items: list[dict]) -> tuple[list[dict], int]:
+    """items（種別="工事区分"の見出し・"小計区切り"を含みうる）から、実際に
+    シートへ書き出す行のリストを組み立てる。
+
+    - 種別="工事区分" → 品名だけの見出し行（その手前のグループがあれば先に小計を出す）
+    - 種別="小計区切り" → 見出しが無くても、そこまでの品目だけで小計を出す
+      （単独の品目が独自の小計を持つ業者の書き方にも対応するため）
+    どちらも無ければ今までどおり全体で1つの小計のみになる。
+    """
+    has_markers = any(e.get("種別") in ("工事区分", "小計区切り") for e in items)
+
+    def _item_line(entry: dict) -> tuple[dict, int]:
+        qty = entry.get("数量", 0) or 0
+        price = math.floor(entry.get("上乗せ後単価", 0) or 0)
+        amount = math.floor(qty * price)
+        line = {
+            "kind": "item", "品名": entry.get("品名", ""), "規格": entry.get("規格", ""),
+            "単位": entry.get("単位", ""), "数量": qty, "単価": price, "金額": amount,
+        }
+        return line, amount
+
+    lines: list[dict] = []
+    subtotal = 0
+
+    if not has_markers:
+        # 区切りが一切無い場合は、今までどおり全体で1つの小計のみになる
+        for entry in items:
+            line, amount = _item_line(entry)
+            subtotal += amount
+            lines.append(line)
+        return lines, subtotal
+
+    section_amount = 0
+    section_has_items = False
+
+    def close_section():
+        nonlocal section_amount, section_has_items
+        if section_has_items and section_amount > 0:
+            lines.append({"kind": "section_subtotal", "amount": section_amount})
+        section_amount = 0
+        section_has_items = False
+
+    for entry in items:
+        kind = entry.get("種別")
+        if kind == "工事区分":
+            close_section()
+            lines.append({"kind": "section", "label": entry.get("品名", "")})
+        elif kind == "小計区切り":
+            close_section()
+        else:
+            line, amount = _item_line(entry)
+            subtotal += amount
+            section_amount += amount
+            section_has_items = True
+            lines.append(line)
+    close_section()
+    return lines, subtotal
+
+
 def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
                    tax_rate: float, template_path: Path | None = None) -> bytes:
-    """items: [{"品名","数量","上乗せ後単価"}]（税別）を template に流し込み、
-    小計・消費税（小数点以下切り捨て）・合計まで計算して bytes を返す。
+    """items: [{"種別","品名","規格","数量","単位","上乗せ後単価"}]（税別）を
+    template に流し込み、小計・消費税（小数点以下切り捨て）・合計まで計算して
+    bytes を返す。「種別」が"工事区分"の行は品名のみの見出し行として出力され、
+    元の見積書が工事箇所ごとに分かれている場合はその区切りで小計が入る。
 
-    品目数があらかじめ用意された行数（MAX_DATA_ROWS）を超える場合は、
-    小計・消費税・合計欄を必要な分だけ下にずらして衝突を避ける。
+    出力行数（見出し・小計を含む）があらかじめ用意された行数（MAX_DATA_ROWS）
+    を超える場合は、小計・消費税・合計欄を必要な分だけ下にずらして衝突を避ける。
     """
     template_path = Path(template_path) if template_path else Path(cfg.TEMPLATE_PATH)
     wb = load_workbook(template_path)
@@ -223,8 +284,10 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
     if issuer_info.get("registration_no"):
         ws[cfg.CELL_ISSUER_REG_NO] = f"登録番号：{issuer_info['registration_no']}"
 
+    render_lines, subtotal = _build_render_lines(items)
+
     subtotal_row, tax_row, total_row = cfg.SUBTOTAL_ROW, cfg.TAX_ROW, cfg.TOTAL_ROW
-    overflow = max(0, len(items) - cfg.MAX_DATA_ROWS)
+    overflow = max(0, len(render_lines) - cfg.MAX_DATA_ROWS)
 
     if overflow > 0:
         # 元の小計〜合計ブロック（結合済み）を解除する
@@ -242,18 +305,27 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
 
         _build_summary_block(ws, subtotal_row, tax_row, total_row, tax_rate=tax_rate)
 
-    subtotal = 0
-    for i, item in enumerate(items):
+    bold = Font(bold=True)
+    for i, line in enumerate(render_lines):
         row = cfg.DATA_START_ROW + i
-        qty = item.get("数量", 0) or 0
-        price = math.floor(item.get("上乗せ後単価", 0) or 0)
-        amount = math.floor(qty * price)
-        subtotal += amount
-        ws[f"{cfg.COL_ITEM_NAME}{row}"] = item.get("品名", "")
-        ws[f"{cfg.COL_UNIT}{row}"] = item.get("単位", "")
-        ws[f"{cfg.COL_QTY}{row}"] = qty
-        ws[f"{cfg.COL_UNIT_PRICE}{row}"] = price
-        ws[f"{cfg.COL_AMOUNT}{row}"] = amount
+        if line["kind"] == "section":
+            cell = ws[f"{cfg.COL_ITEM_NAME}{row}"]
+            cell.value = line["label"]
+            cell.font = bold
+        elif line["kind"] == "section_subtotal":
+            name_cell = ws[f"{cfg.COL_ITEM_NAME}{row}"]
+            name_cell.value = "【小計】"
+            name_cell.font = bold
+            amount_cell = ws[f"{cfg.COL_AMOUNT}{row}"]
+            amount_cell.value = line["amount"]
+            amount_cell.font = bold
+        else:
+            ws[f"{cfg.COL_ITEM_NAME}{row}"] = line["品名"]
+            ws[f"{cfg.COL_SPEC}{row}"] = line["規格"]
+            ws[f"{cfg.COL_UNIT}{row}"] = line["単位"]
+            ws[f"{cfg.COL_QTY}{row}"] = line["数量"]
+            ws[f"{cfg.COL_UNIT_PRICE}{row}"] = line["単価"]
+            ws[f"{cfg.COL_AMOUNT}{row}"] = line["金額"]
 
     tax_amount = math.floor(subtotal * tax_rate / 100)
     grand_total = subtotal + tax_amount

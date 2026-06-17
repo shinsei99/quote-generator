@@ -57,8 +57,10 @@ st.markdown(
 st.title("🧾 見積書自動生成ツール")
 st.caption("取引先から受け取ったPDF/Excelの見積書を読み取り、上乗せ率を反映して自社テンプレートに転記します")
 
+ITEM_COLUMNS = ["種別", "品名", "規格", "数量", "単位", "元単価"]
+
 if "items_df" not in st.session_state:
-    st.session_state.items_df = pd.DataFrame(columns=["品名", "数量", "単位", "元単価"])
+    st.session_state.items_df = pd.DataFrame(columns=ITEM_COLUMNS)
 if "last_uploaded_name" not in st.session_state:
     st.session_state.last_uploaded_name = None
 
@@ -76,27 +78,58 @@ if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name
 
     if items:
         df = pd.DataFrame(items)
-        if "単位" not in df.columns:
-            df["単位"] = ""
-        st.session_state.items_df = df[["品名", "数量", "単位", "元単価"]]
-        st.success(f"{len(items)} 件の品目を読み取りました（方式: {method}）。内容を確認・修正してください。")
+        for col in ITEM_COLUMNS:
+            if col not in df.columns:
+                df[col] = "" if col != "種別" else "品目"
+        df["品名"] = df["品名"].fillna("")
+        df["規格"] = df["規格"].fillna("")
+        df["単位"] = df["単位"].fillna("")
+        df["数量"] = pd.to_numeric(df["数量"], errors="coerce").fillna(0)
+        df["元単価"] = pd.to_numeric(df["元単価"], errors="coerce").fillna(0)
+        st.session_state.items_df = df[ITEM_COLUMNS]
+        n_sections = (df["種別"] == "工事区分").sum()
+        n_breaks = (df["種別"] == "小計区切り").sum()
+        note_parts = []
+        if n_sections:
+            note_parts.append(f"工事区分の見出し {n_sections} 件")
+        if n_breaks:
+            note_parts.append(f"小計区切り {n_breaks} 件")
+        note = f"（{'、'.join(note_parts)}）" if note_parts else ""
+        st.success(f"{len(items)} 件読み取りました（方式: {method}）{note}。内容を確認・修正してください。")
     else:
         st.warning("品目を自動検出できませんでした。下の表に手動で入力してください。")
     st.session_state.last_uploaded_name = uploaded.name
 
 st.subheader("📋 品目データ（編集可能）")
-st.caption("自動読み取りに誤りがある場合は、表のセルを直接クリックして修正・行の追加/削除ができます")
+st.caption(
+    "自動読み取りに誤りがある場合は、表のセルを直接クリックして修正・行の追加/削除ができます。"
+    "「種別」が工事区分の行は品名だけの見出しとして、小計区切りの行はそこまでの品目で"
+    "小計を作る区切りとして出力されます（元の見積書が工事箇所ごとに分かれている場合、"
+    "できるだけ同じ区切り・見出しで出力されます）。"
+)
 
-if st.button("＋ 行を追加"):
-    new_row = pd.DataFrame([{"品名": "", "数量": 1, "単位": "", "元単価": 0}])
-    st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
+bc1, bc2, bc3 = st.columns(3)
+with bc1:
+    if st.button("＋ 品目行を追加"):
+        new_row = pd.DataFrame([{"種別": "品目", "品名": "", "規格": "", "数量": 1, "単位": "", "元単価": 0}])
+        st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
+with bc2:
+    if st.button("＋ 工事区分の見出しを追加"):
+        new_row = pd.DataFrame([{"種別": "工事区分", "品名": "", "規格": "", "数量": 0, "単位": "", "元単価": 0}])
+        st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
+with bc3:
+    if st.button("＋ 小計区切りを追加"):
+        new_row = pd.DataFrame([{"種別": "小計区切り", "品名": "", "規格": "", "数量": 0, "単位": "", "元単価": 0}])
+        st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 
 edited_df = st.data_editor(
     st.session_state.items_df,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
+        "種別": st.column_config.SelectboxColumn("種別", options=["品目", "工事区分", "小計区切り"], width="small"),
         "品名": st.column_config.TextColumn("品名", width="large"),
+        "規格": st.column_config.TextColumn("規格・仕様", width="medium"),
         "数量": st.column_config.NumberColumn("数量", min_value=0, step=1),
         "単位": st.column_config.TextColumn("単位", width="small"),
         "元単価": st.column_config.NumberColumn("元単価（円）", min_value=0, step=1),
@@ -120,13 +153,22 @@ with c_rate2:
     )
 
 calc_df = edited_df.copy()
-calc_df["数量"] = pd.to_numeric(calc_df["数量"], errors="coerce").fillna(0)
+calc_df["種別"] = calc_df["種別"].fillna("品目") if "種別" in calc_df.columns else "品目"
+calc_df.loc[calc_df["種別"] == "", "種別"] = "品目"
+calc_df["規格"] = calc_df["規格"].fillna("") if "規格" in calc_df.columns else ""
 calc_df["単位"] = calc_df["単位"].fillna("") if "単位" in calc_df.columns else ""
+calc_df["数量"] = pd.to_numeric(calc_df["数量"], errors="coerce").fillna(0)
 calc_df["元単価"] = pd.to_numeric(calc_df["元単価"], errors="coerce").fillna(0)
+is_item = calc_df["種別"] == "品目"
 # 上乗せ後単価・金額は消費税を含まない（税別）。小数点以下は切り捨て。
-calc_df["上乗せ後単価"] = (calc_df["元単価"] * (1 + markup_rate / 100)).apply(math.floor)
-calc_df["金額"] = (calc_df["数量"] * calc_df["上乗せ後単価"]).apply(math.floor)
-calc_df = calc_df[calc_df["品名"].astype(str).str.strip() != ""].reset_index(drop=True)
+# 工事区分の見出し行は金額計算の対象外（0として扱う）。
+calc_df["上乗せ後単価"] = 0
+calc_df["金額"] = 0
+calc_df.loc[is_item, "上乗せ後単価"] = (calc_df.loc[is_item, "元単価"] * (1 + markup_rate / 100)).apply(math.floor)
+calc_df.loc[is_item, "金額"] = (calc_df.loc[is_item, "数量"] * calc_df.loc[is_item, "上乗せ後単価"]).apply(math.floor)
+calc_df = calc_df[
+    (calc_df["品名"].astype(str).str.strip() != "") | (calc_df["種別"] == "小計区切り")
+].reset_index(drop=True)
 
 st.subheader("💰 上乗せ後の計算結果（税別）")
 if calc_df.empty:
@@ -134,10 +176,10 @@ if calc_df.empty:
     subtotal = tax_amount = grand_total = 0
 else:
     st.dataframe(
-        calc_df[["品名", "数量", "単位", "元単価", "上乗せ後単価", "金額"]],
+        calc_df[["種別", "品名", "規格", "数量", "単位", "元単価", "上乗せ後単価", "金額"]],
         use_container_width=True,
     )
-    subtotal = int(calc_df["金額"].sum())
+    subtotal = int(calc_df.loc[calc_df["種別"] == "品目", "金額"].sum())
     tax_amount = math.floor(subtotal * tax_rate / 100)
     grand_total = subtotal + tax_amount
     st.markdown(
@@ -211,7 +253,7 @@ st.divider()
 if calc_df.empty:
     st.button("📥 編集済み見積書をダウンロード", disabled=True, use_container_width=True)
 else:
-    items_payload = calc_df[["品名", "数量", "単位", "上乗せ後単価"]].to_dict("records")
+    items_payload = calc_df[["種別", "品名", "規格", "数量", "単位", "上乗せ後単価"]].to_dict("records")
     header_info = {
         "client": client,
         "issue_date": issue_date if issue_date else None,
