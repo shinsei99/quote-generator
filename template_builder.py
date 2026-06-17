@@ -15,6 +15,12 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 HEADER_FILL = PatternFill("solid", fgColor="D9E2F3")
 CENTER = Alignment(horizontal="center", vertical="center")
 
+# 品目データ行の列構成（結合する終了列。Noneは単一セル）
+DATA_COL_SPECS = [
+    (cfg.COL_ITEM_NAME, "C"), (cfg.COL_SPEC, "F"), (cfg.COL_QTY, None),
+    (cfg.COL_UNIT, None), (cfg.COL_UNIT_PRICE, None), (cfg.COL_AMOUNT, "K"), (cfg.COL_NOTE, "N"),
+]
+
 
 def _merge(ws, cell_range: str):
     ws.merge_cells(cell_range)
@@ -44,6 +50,47 @@ def _set(ws, cell_range: str, value=None, font=None, fill=None, align=None, bord
             for c in range(min_col, max_col + 1):
                 ws.cell(row=r, column=c).border = border
     return cell
+
+
+def _style_data_row(ws, row: int):
+    """指定した1行を、品目データ行と同じ結合・罫線スタイルにする。"""
+    for start_col, end_col in DATA_COL_SPECS:
+        cell_range = f"{start_col}{row}:{end_col}{row}" if end_col else f"{start_col}{row}"
+        _set(ws, cell_range, border=BORDER)
+
+
+def _clear_row_range(ws, row_start: int, row_end: int):
+    """指定した行範囲の値・結合をすべて解除する（サマリー欄を移動する前の下準備）。"""
+    for m in list(ws.merged_cells.ranges):
+        if m.min_row >= row_start and m.max_row <= row_end:
+            ws.unmerge_cells(str(m))
+    for row in range(row_start, row_end + 1):
+        for col in range(1, 15):
+            ws.cell(row=row, column=col).value = None
+
+
+def _build_summary_block(ws, subtotal_row: int, tax_row: int, total_row: int, tax_rate: float = 10):
+    """小計・消費税・合計の3行ブロックを指定した行位置に作成する。"""
+    header_font = Font(bold=True)
+
+    _set(ws, f"A{subtotal_row}:{cfg.LABEL_COL_END_SUBTOTAL}{subtotal_row}", "小　計",
+         font=header_font, align=Alignment(horizontal="center"), border=BORDER)
+    _set(ws, f"{cfg.VALUE_COL_START}{subtotal_row}:{cfg.VALUE_COL_END}{subtotal_row}", 0,
+         align=Alignment(horizontal="right"), border=BORDER, number_format="#,##0")
+
+    _set(ws, f"A{tax_row}:{cfg.LABEL_COL_END_SUBTOTAL}{tax_row}", "消　費　税",
+         font=header_font, align=Alignment(horizontal="center"), border=BORDER)
+    _set(ws, f"{cfg.TAX_RATE_COL}{tax_row}", tax_rate, align=CENTER, border=BORDER)
+    _set(ws, f"{cfg.TAX_RATE_UNIT_COL}{tax_row}", "％", align=CENTER, border=BORDER)
+    _set(ws, f"{cfg.VALUE_COL_START}{tax_row}:{cfg.VALUE_COL_END}{tax_row}", 0,
+         align=Alignment(horizontal="right"), border=BORDER, number_format="#,##0")
+
+    total_row_end = total_row + 1
+    _set(ws, f"A{total_row}:{cfg.LABEL_COL_END_TOTAL}{total_row_end}", "合　計",
+         font=Font(bold=True, size=13), align=CENTER, border=BORDER)
+    _set(ws, f"{cfg.VALUE_COL_START}{total_row}:{cfg.VALUE_COL_END}{total_row_end}", 0,
+         font=Font(bold=True, size=13), align=Alignment(horizontal="right", vertical="center"),
+         border=BORDER, number_format="#,##0")
 
 
 def ensure_template_exists(path: Path | None = None) -> Path:
@@ -113,34 +160,11 @@ def ensure_template_exists(path: Path | None = None) -> Path:
         _set(ws, cell_range, label, font=header_font, fill=HEADER_FILL, align=CENTER, border=BORDER)
 
     # 品目データ行（罫線・結合のみ用意）
-    data_col_specs = [
-        (cfg.COL_ITEM_NAME, "C"), (cfg.COL_SPEC, "F"), (cfg.COL_QTY, None),
-        (cfg.COL_UNIT, None), (cfg.COL_UNIT_PRICE, None), (cfg.COL_AMOUNT, "K"), (cfg.COL_NOTE, "N"),
-    ]
     for r in range(cfg.DATA_START_ROW, cfg.DATA_START_ROW + cfg.MAX_DATA_ROWS):
-        for start_col, end_col in data_col_specs:
-            cell_range = f"{start_col}{r}:{end_col}{r}" if end_col else f"{start_col}{r}"
-            _set(ws, cell_range, border=BORDER)
+        _style_data_row(ws, r)
 
     # 小計・消費税・合計
-    _set(ws, f"A{cfg.SUBTOTAL_ROW}:{cfg.LABEL_COL_END_SUBTOTAL}{cfg.SUBTOTAL_ROW}", "小　計",
-         font=header_font, align=Alignment(horizontal="center"), border=BORDER)
-    _set(ws, f"{cfg.VALUE_COL_START}{cfg.SUBTOTAL_ROW}:{cfg.VALUE_COL_END}{cfg.SUBTOTAL_ROW}", 0,
-         align=Alignment(horizontal="right"), border=BORDER, number_format="#,##0")
-
-    _set(ws, f"A{cfg.TAX_ROW}:{cfg.LABEL_COL_END_SUBTOTAL}{cfg.TAX_ROW}", "消　費　税",
-         font=header_font, align=Alignment(horizontal="center"), border=BORDER)
-    _set(ws, f"{cfg.TAX_RATE_COL}{cfg.TAX_ROW}", 10, align=CENTER, border=BORDER)
-    _set(ws, f"{cfg.TAX_RATE_UNIT_COL}{cfg.TAX_ROW}", "％", align=CENTER, border=BORDER)
-    _set(ws, f"{cfg.VALUE_COL_START}{cfg.TAX_ROW}:{cfg.VALUE_COL_END}{cfg.TAX_ROW}", 0,
-         align=Alignment(horizontal="right"), border=BORDER, number_format="#,##0")
-
-    total_row_end = cfg.TOTAL_ROW + 1
-    _set(ws, f"A{cfg.TOTAL_ROW}:{cfg.LABEL_COL_END_TOTAL}{total_row_end}", "合　計",
-         font=Font(bold=True, size=13), align=CENTER, border=BORDER)
-    _set(ws, f"{cfg.VALUE_COL_START}{cfg.TOTAL_ROW}:{cfg.VALUE_COL_END}{total_row_end}", 0,
-         font=Font(bold=True, size=13), align=Alignment(horizontal="right", vertical="center"),
-         border=BORDER, number_format="#,##0")
+    _build_summary_block(ws, cfg.SUBTOTAL_ROW, cfg.TAX_ROW, cfg.TOTAL_ROW)
 
     widths = {
         "A": 10, "B": 8, "C": 8, "D": 8, "E": 8, "F": 8,
@@ -158,6 +182,9 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
                    tax_rate: float, template_path: Path | None = None) -> bytes:
     """items: [{"品名","数量","上乗せ後単価"}]（税別）を template に流し込み、
     小計・消費税（小数点以下切り捨て）・合計まで計算して bytes を返す。
+
+    品目数があらかじめ用意された行数（MAX_DATA_ROWS）を超える場合は、
+    小計・消費税・合計欄を必要な分だけ下にずらして衝突を避ける。
     """
     template_path = Path(template_path) if template_path else Path(cfg.TEMPLATE_PATH)
     wb = load_workbook(template_path)
@@ -181,6 +208,25 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
     if issuer_info.get("registration_no"):
         ws[cfg.CELL_ISSUER_REG_NO] = f"登録番号：{issuer_info['registration_no']}"
 
+    subtotal_row, tax_row, total_row = cfg.SUBTOTAL_ROW, cfg.TAX_ROW, cfg.TOTAL_ROW
+    overflow = max(0, len(items) - cfg.MAX_DATA_ROWS)
+
+    if overflow > 0:
+        # 元の小計〜合計ブロック（結合済み）を解除し、通常のデータ行として再利用する
+        _clear_row_range(ws, cfg.SUBTOTAL_ROW, cfg.TOTAL_ROW + 1)
+        for row in range(cfg.SUBTOTAL_ROW, cfg.TOTAL_ROW + 2):
+            _style_data_row(ws, row)
+
+        subtotal_row = cfg.SUBTOTAL_ROW + overflow
+        tax_row = cfg.TAX_ROW + overflow
+        total_row = cfg.TOTAL_ROW + overflow
+
+        # 元のブロックより下、新しい小計欄より上の行にもスタイルを適用
+        for row in range(cfg.TOTAL_ROW + 2, subtotal_row):
+            _style_data_row(ws, row)
+
+        _build_summary_block(ws, subtotal_row, tax_row, total_row, tax_rate=tax_rate)
+
     subtotal = 0
     for i, item in enumerate(items):
         row = cfg.DATA_START_ROW + i
@@ -196,10 +242,10 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
     tax_amount = math.floor(subtotal * tax_rate / 100)
     grand_total = subtotal + tax_amount
 
-    ws[f"{cfg.VALUE_COL_START}{cfg.SUBTOTAL_ROW}"] = subtotal
-    ws[f"{cfg.TAX_RATE_COL}{cfg.TAX_ROW}"] = tax_rate
-    ws[f"{cfg.VALUE_COL_START}{cfg.TAX_ROW}"] = tax_amount
-    ws[f"{cfg.VALUE_COL_START}{cfg.TOTAL_ROW}"] = grand_total
+    ws[f"{cfg.VALUE_COL_START}{subtotal_row}"] = subtotal
+    ws[f"{cfg.TAX_RATE_COL}{tax_row}"] = tax_rate
+    ws[f"{cfg.VALUE_COL_START}{tax_row}"] = tax_amount
+    ws[f"{cfg.VALUE_COL_START}{total_row}"] = grand_total
     ws[cfg.CELL_TOTAL_DISPLAY] = grand_total
 
     buf = io.BytesIO()
