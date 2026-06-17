@@ -15,6 +15,26 @@ BASE_DIR = Path(__file__).parent
 TEMPLATE_PATH = BASE_DIR / cfg.TEMPLATE_PATH
 ensure_template_exists(TEMPLATE_PATH)
 
+DATA_DIR = BASE_DIR / "data"
+ISSUERS_CSV = DATA_DIR / "issuers.csv"
+DATA_DIR.mkdir(exist_ok=True)
+
+ISSUER_FIELDS = ["name", "address", "tel", "fax", "registration_no", "license"]
+EMPTY_ISSUER = {f: "" for f in ISSUER_FIELDS}
+
+
+def load_issuers() -> pd.DataFrame:
+    if ISSUERS_CSV.exists():
+        return pd.read_csv(ISSUERS_CSV, dtype=str).fillna("")
+    return pd.DataFrame(columns=ISSUER_FIELDS)
+
+
+def save_issuer(data: dict):
+    df = load_issuers()
+    df = df[df["name"] != data["name"]]
+    df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
+    df.to_csv(ISSUERS_CSV, index=False)
+
 st.markdown(
     """
     <style>
@@ -138,15 +158,53 @@ with c2:
     issue_date = st.date_input("発行日", value=datetime.date.today())
 
 st.subheader("🏢 発行元（自社）情報")
+
+if "issuer_form_version" not in st.session_state:
+    st.session_state.issuer_form_version = 0
+if "issuer_prefill" not in st.session_state:
+    st.session_state.issuer_prefill = dict(EMPTY_ISSUER)
+
+issuers_df = load_issuers()
+NEW_ISSUER_LABEL = "＋ 新規入力"
+issuer_options = [NEW_ISSUER_LABEL] + issuers_df["name"].tolist()
+
+selected_issuer = st.selectbox(
+    "会社名から呼び出し（保存済みの発行元）", issuer_options, key="issuer_select",
+)
+
+if selected_issuer != NEW_ISSUER_LABEL:
+    row = issuers_df[issuers_df["name"] == selected_issuer].iloc[0]
+    candidate_prefill = {f: row.get(f, "") for f in ISSUER_FIELDS}
+else:
+    candidate_prefill = dict(EMPTY_ISSUER)
+
+if candidate_prefill != st.session_state.issuer_prefill:
+    st.session_state.issuer_prefill = candidate_prefill
+    st.session_state.issuer_form_version += 1
+
+v = st.session_state.issuer_form_version
+p = st.session_state.issuer_prefill
+
 c3, c4 = st.columns(2)
 with c3:
-    issuer_name = st.text_input("発行元 会社名")
-    issuer_address = st.text_input("発行元 住所")
-    issuer_license = st.text_input("許可番号など（任意）")
+    issuer_name = st.text_input("発行元 会社名", value=p["name"], key=f"issuer_name_{v}")
+    issuer_address = st.text_input("発行元 住所", value=p["address"], key=f"issuer_address_{v}")
+    issuer_license = st.text_input("許可番号など（任意）", value=p["license"], key=f"issuer_license_{v}")
 with c4:
-    issuer_tel = st.text_input("発行元 TEL")
-    issuer_fax = st.text_input("発行元 FAX")
-    issuer_reg_no = st.text_input("インボイス登録番号")
+    issuer_tel = st.text_input("発行元 TEL", value=p["tel"], key=f"issuer_tel_{v}")
+    issuer_fax = st.text_input("発行元 FAX", value=p["fax"], key=f"issuer_fax_{v}")
+    issuer_reg_no = st.text_input("インボイス登録番号", value=p["registration_no"], key=f"issuer_reg_no_{v}")
+
+if st.button("💾 この発行元情報を保存"):
+    if not issuer_name.strip():
+        st.error("会社名を入力してください")
+    else:
+        save_issuer({
+            "name": issuer_name.strip(), "address": issuer_address, "tel": issuer_tel,
+            "fax": issuer_fax, "registration_no": issuer_reg_no, "license": issuer_license,
+        })
+        st.success(f"「{issuer_name}」の発行元情報を保存しました。次回から会社名で呼び出せます。")
+        st.rerun()
 
 st.divider()
 
