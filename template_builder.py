@@ -240,6 +240,7 @@ def _build_render_lines(items: list[dict]) -> tuple[list[dict], int]:
         line = {
             "kind": "item", "品名": entry.get("品名", ""), "規格": entry.get("規格", ""),
             "単位": entry.get("単位", ""), "数量": qty, "単価": price, "金額": amount,
+            "備考": entry.get("備考", ""),
         }
         return line, amount
 
@@ -349,6 +350,7 @@ def _fill_sheet(ws, items: list[dict], header_info: dict, issuer_info: dict,
             ws[f"{cfg.COL_QTY}{row}"] = line["数量"]
             ws[f"{cfg.COL_UNIT_PRICE}{row}"] = line["単価"]
             ws[f"{cfg.COL_AMOUNT}{row}"] = line["金額"]
+            ws[f"{cfg.COL_NOTE}{row}"] = line["備考"]
 
     tax_amount = math.floor(subtotal * tax_rate / 100)
     grand_total = subtotal + tax_amount

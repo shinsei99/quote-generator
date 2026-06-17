@@ -58,7 +58,7 @@ st.markdown(
 st.title("🧾 見積書自動生成ツール")
 st.caption("取引先から受け取ったPDF/Excelの見積書を読み取り、上乗せ率を反映して自社テンプレートに転記します")
 
-ITEM_COLUMNS = ["種別", "品名", "規格", "数量", "単位", "元単価"]
+ITEM_COLUMNS = ["種別", "品名", "規格", "備考", "数量", "単位", "元単価"]
 
 if "items_df" not in st.session_state:
     st.session_state.items_df = pd.DataFrame(columns=ITEM_COLUMNS)
@@ -88,6 +88,7 @@ if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name
                 df[col] = "" if col != "種別" else "品目"
         df["品名"] = df["品名"].fillna("")
         df["規格"] = df["規格"].fillna("")
+        df["備考"] = df["備考"].fillna("")
         df["単位"] = df["単位"].fillna("")
         df["数量"] = pd.to_numeric(df["数量"], errors="coerce").fillna(0)
         df["元単価"] = pd.to_numeric(df["元単価"], errors="coerce").fillna(0)
@@ -128,15 +129,15 @@ st.caption(
 bc1, bc2, bc3 = st.columns(3)
 with bc1:
     if st.button("＋ 品目行を追加"):
-        new_row = pd.DataFrame([{"種別": "品目", "品名": "", "規格": "", "数量": 1, "単位": "", "元単価": 0}])
+        new_row = pd.DataFrame([{"種別": "品目", "品名": "", "規格": "", "備考": "", "数量": 1, "単位": "", "元単価": 0}])
         st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 with bc2:
     if st.button("＋ 工事区分の見出しを追加"):
-        new_row = pd.DataFrame([{"種別": "工事区分", "品名": "", "規格": "", "数量": 0, "単位": "", "元単価": 0}])
+        new_row = pd.DataFrame([{"種別": "工事区分", "品名": "", "規格": "", "備考": "", "数量": 0, "単位": "", "元単価": 0}])
         st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 with bc3:
     if st.button("＋ 小計区切りを追加"):
-        new_row = pd.DataFrame([{"種別": "小計区切り", "品名": "", "規格": "", "数量": 0, "単位": "", "元単価": 0}])
+        new_row = pd.DataFrame([{"種別": "小計区切り", "品名": "", "規格": "", "備考": "", "数量": 0, "単位": "", "元単価": 0}])
         st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 
 edited_df = st.data_editor(
@@ -147,6 +148,7 @@ edited_df = st.data_editor(
         "種別": st.column_config.SelectboxColumn("種別", options=["品目", "工事区分", "小計区切り"], width="small"),
         "品名": st.column_config.TextColumn("品名", width="large"),
         "規格": st.column_config.TextColumn("規格・仕様", width="medium"),
+        "備考": st.column_config.TextColumn("備考", width="medium"),
         "数量": st.column_config.NumberColumn("数量", min_value=0, step=1),
         "単位": st.column_config.TextColumn("単位", width="small"),
         "元単価": st.column_config.NumberColumn("元単価（円）", min_value=0, step=1),
@@ -185,6 +187,7 @@ calc_df = edited_df.copy()
 calc_df["種別"] = calc_df["種別"].fillna("品目") if "種別" in calc_df.columns else "品目"
 calc_df.loc[calc_df["種別"] == "", "種別"] = "品目"
 calc_df["規格"] = calc_df["規格"].fillna("") if "規格" in calc_df.columns else ""
+calc_df["備考"] = calc_df["備考"].fillna("") if "備考" in calc_df.columns else ""
 calc_df["単位"] = calc_df["単位"].fillna("") if "単位" in calc_df.columns else ""
 calc_df["数量"] = pd.to_numeric(calc_df["数量"], errors="coerce").fillna(0)
 calc_df["元単価"] = pd.to_numeric(calc_df["元単価"], errors="coerce").fillna(0)
@@ -202,7 +205,7 @@ calc_df = calc_df[
 if apply_discount and discount_amount > 0:
     # 値引きは上乗せ率の対象外（元の値引き額をそのまま差し引く）
     discount_row = pd.DataFrame([{
-        "種別": "品目", "品名": "値引", "規格": "", "数量": 1, "単位": "",
+        "種別": "品目", "品名": "値引", "規格": "", "備考": "", "数量": 1, "単位": "",
         "元単価": -discount_amount, "上乗せ後単価": -discount_amount, "金額": -discount_amount,
     }])
     calc_df = pd.concat([calc_df, discount_row], ignore_index=True)
@@ -213,7 +216,7 @@ if calc_df.empty:
     subtotal = tax_amount = grand_total = 0
 else:
     st.dataframe(
-        calc_df[["種別", "品名", "規格", "数量", "単位", "元単価", "上乗せ後単価", "金額"]],
+        calc_df[["種別", "品名", "規格", "備考", "数量", "単位", "元単価", "上乗せ後単価", "金額"]],
         use_container_width=True,
     )
     subtotal = int(calc_df.loc[calc_df["種別"] == "品目", "金額"].sum())
@@ -296,7 +299,7 @@ st.divider()
 if calc_df.empty:
     st.button("📥 見積書・請求書をダウンロード（1冊にまとめて）", disabled=True, use_container_width=True)
 else:
-    items_payload = calc_df[["種別", "品名", "規格", "数量", "単位", "上乗せ後単価"]].to_dict("records")
+    items_payload = calc_df[["種別", "品名", "規格", "備考", "数量", "単位", "上乗せ後単価"]].to_dict("records")
     header_info = {
         "client": client,
         "issue_date": issue_date if issue_date else None,

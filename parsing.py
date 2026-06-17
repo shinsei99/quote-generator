@@ -84,6 +84,7 @@ _ITEM_JSON_SCHEMA = {
                     "種別": {"type": "string"},
                     "品名": {"type": "string"},
                     "規格仕様": {"type": "string"},
+                    "備考": {"type": "string"},
                     "数量": {"type": "string"},
                     "単位": {"type": "string"},
                     "単価": {"type": "string"},
@@ -101,13 +102,19 @@ _CLAUDE_PROMPT = (
     "見積書ごとにレイアウトは統一されていません。書かれている品目データを漏れなく抽出し、"
     "指定したJSON Schemaに従ってJSONのみを返してください。\n"
     "ルール:\n"
-    "・各品目の「種別」には、見積書内でその品目がグルーピングされている工事区分・カテゴリ名"
-    "（例：クロス貼替工事、床工事など）を入れてください。明確なグルーピングが無い品目は種別を空文字にしてください。\n"
-    "・小計・合計・消費税など、品目自体ではなく集計を表す行は items に含めないでください。\n"
+    "・各品目の「種別」には、見積書内で実際にグルーピングされている工事区分・カテゴリ名を"
+    "入れてください（例：＜給湯室改修工事＞のような大きな見出し、または同じ製品群でまとめられた"
+    "小見出し）。明確なグルーピングが無い品目は種別を空文字にしてください。\n"
+    "・小計・合計・中計・大計・消費税など、品目自体ではなく集計を表す行は絶対に items に"
+    "含めないでください（【小計】のような記号つきの行も同様です）。\n"
     "・値引き・割引があれば、品名を「値引」とし、金額をマイナス値にして items に含めてください。\n"
+    "・各品目に紐づく備考（注記・補足説明・＠単価などの参考表記）があれば「備考」に入れてください。\n"
     "・単価が見積書に書かれておらず金額のみ分かる場合は、単価を空文字のままにして構いません。\n"
     "・数量・単価・金額は数字のみ（カンマや円マークを含めない）にしてください。"
 )
+
+# Claudeが誤って集計行を品目として返してしまった場合に備えた、コード側での防御フィルター
+_SUMMARY_ROW_MARKERS = ("小計", "合計", "中計", "大計", "【", "】")
 
 
 class ClaudeExtractionError(RuntimeError):
@@ -184,6 +191,9 @@ def _build_entries_from_claude_items(raw_items: list[dict]) -> list[dict]:
         name = str(raw.get("品名", "")).strip()
         if not name:
             continue
+        if name != "値引" and any(m in name for m in _SUMMARY_ROW_MARKERS):
+            # Claudeが指示に反して小計・合計などの集計行を返した場合の防御フィルター
+            continue
 
         section = str(raw.get("種別", "")).strip()
         if prev_section is not None and section != prev_section:
@@ -208,6 +218,7 @@ def _build_entries_from_claude_items(raw_items: list[dict]) -> list[dict]:
             "種別": "品目",
             "品名": name,
             "規格": str(raw.get("規格仕様", "")).strip(),
+            "備考": str(raw.get("備考", "")).strip(),
             "単位": str(raw.get("単位", "")).strip(),
             "数量": eff_qty,
             "元単価": round(eff_price, 2),
@@ -223,7 +234,7 @@ def extract_items_from_excel(file_bytes: bytes) -> list[dict]:
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
 
-    header_idx = col_name = col_qty = col_unit = col_spec = col_price = None
+    header_idx = col_name = col_qty = col_unit = col_spec = col_price = col_note = None
     for i, row in enumerate(rows[:15]):
         texts = [str(c).strip() if c is not None else "" for c in row]
         cn = find_col(texts, ITEM_NAME_KEYWORDS)
@@ -231,8 +242,11 @@ def extract_items_from_excel(file_bytes: bytes) -> list[dict]:
         cu = find_col(texts, UNIT_KEYWORDS)
         cs = find_col(texts, SPEC_KEYWORDS)
         cp = find_col(texts, PRICE_KEYWORDS)
+        cnote = find_col(texts, ["備考", "note", "remarks"])
         if cn is not None and (cq is not None or cp is not None):
-            header_idx, col_name, col_qty, col_unit, col_spec, col_price = i, cn, cq, cu, cs, cp
+            header_idx, col_name, col_qty, col_unit, col_spec, col_price, col_note = (
+                i, cn, cq, cu, cs, cp, cnote,
+            )
             break
 
     if header_idx is None:
@@ -256,6 +270,7 @@ def extract_items_from_excel(file_bytes: bytes) -> list[dict]:
             "種別": "品目",
             "品名": str(name).strip(),
             "規格": _cell_text(row, col_spec),
+            "備考": _cell_text(row, col_note),
             "単位": _cell_text(row, col_unit),
             "数量": qty if qty is not None else 1,
             "元単価": price if price is not None else 0,
