@@ -35,6 +35,28 @@ def save_issuer(data: dict):
     df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
     df.to_csv(ISSUERS_CSV, index=False)
 
+
+TERMS_CSV = DATA_DIR / "term_corrections.csv"
+
+
+def load_term_corrections() -> pd.DataFrame:
+    if TERMS_CSV.exists():
+        return pd.read_csv(TERMS_CSV, dtype=str).fillna("")
+    return pd.DataFrame(columns=["wrong", "correct"])
+
+
+def save_term_correction(wrong: str, correct: str):
+    df = load_term_corrections()
+    df = df[df["wrong"] != wrong]
+    df = pd.concat([df, pd.DataFrame([{"wrong": wrong, "correct": correct}])], ignore_index=True)
+    df.to_csv(TERMS_CSV, index=False)
+
+
+def delete_term_correction(wrong: str):
+    df = load_term_corrections()
+    df = df[df["wrong"] != wrong]
+    df.to_csv(TERMS_CSV, index=False)
+
 st.markdown(
     """
     <style>
@@ -69,8 +91,10 @@ uploaded = st.file_uploader("見積書をアップロード（PDF または Exce
 if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name:
     file_bytes = uploaded.read()
     if uploaded.name.lower().endswith(".pdf"):
+        terms_df = load_term_corrections()
+        custom_corrections = dict(zip(terms_df["wrong"], terms_df["correct"]))
         with st.spinner("PDFを解析しています…（スキャン画像の場合はOCRのため時間がかかることがあります）"):
-            items, method = extract_items_from_pdf(file_bytes)
+            items, method = extract_items_from_pdf(file_bytes, custom_corrections)
     else:
         with st.spinner("Excelを解析しています…"):
             items = extract_items_from_excel(file_bytes)
@@ -149,6 +173,34 @@ edited_df = st.data_editor(
     key="items_editor",
 )
 st.session_state.items_df = edited_df
+
+with st.expander("📖 OCR誤字修正辞書（リフォーム用語）"):
+    st.caption(
+        "上の表で品名を手直ししたら、ここに「誤った表記」と「正しい表記」を登録してください。"
+        "次回以降、スキャンPDFのOCR読み取り結果に自動で反映されます（PDF表形式抽出・Excel読み込みには影響しません）。"
+    )
+    terms_df = load_term_corrections()
+    if not terms_df.empty:
+        for _, row in terms_df.iterrows():
+            tc1, tc2, tc3 = st.columns([3, 3, 1])
+            tc1.write(row["wrong"])
+            tc2.write(f"→ {row['correct']}")
+            if tc3.button("削除", key=f"del_term_{row['wrong']}"):
+                delete_term_correction(row["wrong"])
+                st.rerun()
+    else:
+        st.caption("登録済みの辞書はまだありません。")
+
+    nt1, nt2, nt3 = st.columns([3, 3, 1])
+    new_wrong = nt1.text_input("誤った表記", key="new_term_wrong", placeholder="例：加ス鮎替")
+    new_correct = nt2.text_input("正しい表記", key="new_term_correct", placeholder="例：クロス貼替")
+    if nt3.button("登録", key="add_term_btn"):
+        if not new_wrong.strip() or not new_correct.strip():
+            st.error("両方とも入力してください")
+        else:
+            save_term_correction(new_wrong.strip(), new_correct.strip())
+            st.success(f"「{new_wrong}」→「{new_correct}」を登録しました")
+            st.rerun()
 
 st.divider()
 

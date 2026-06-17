@@ -230,14 +230,83 @@ _OCR_TERM_FIXES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"^ト[ルI](?=\s|$|　)"), "トイレ"),
 ]
 
+# リフォーム工事の見積書でよく使われる定型語彙。OCRの誤読を曖昧一致で
+# 正規化するために使う（語彙はある程度決まっているため、近い文字列が
+# 見つかれば誤読とみなして正規の表記に寄せる）。
+COMMON_REFORM_TERMS: list[str] = [
+    # 内装・床・壁
+    "クロス貼替", "壁紙", "フローリング", "クッションフロア", "畳表替え", "カーペット",
+    "タイル張替", "巾木", "ソフト巾木", "廻り縁", "見切り材", "床下地補修", "天井",
+    # 建具
+    "ふすま", "障子", "扉", "ドア", "サッシ", "窓",
+    # 水回り・設備
+    "キッチン", "流し台", "レンジフード", "換気扇", "洗面所", "洗面台", "洗面化粧台", "浴槽",
+    "ユニットバス", "給湯器", "トイレ", "便器", "エアコン", "リモコン", "キッチンパネル",
+    # 工事種別
+    "解体", "撤去", "設置", "取付", "交換", "補修", "張替", "貼替", "塗装", "防水",
+    "クリーニング", "コーキング",
+    # 諸経費系
+    "諸経費", "運搬費", "交通費", "廃材処分費", "発生材処分費", "養生費",
+]
 
-def fix_common_ocr_terms(text: str) -> str:
+
+def fix_common_ocr_terms(text: str, custom_corrections: dict[str, str] | None = None) -> str:
     """OCR由来の品名に対して、頻出する字形誤認識を補正する。
     デジタルPDF/Excelから取得したテキストには適用しない（必要ないため）。
+
+    1. ユーザー登録の辞書（完全一致の文字列置換）を、生のOCRテキストに適用
+    2. 既知の頻出パターン（正規表現）で補正
+    3. ユーザー登録の辞書を再度適用（手順2で文字列が変わり、画面で見た
+       「誤った表記」と一致しなくなるケースを取りこぼさないため）
+    4. 定型語彙との曖昧一致で、近い文字列を正規の表記に寄せる
     """
+    def _apply_custom(t: str) -> str:
+        if not custom_corrections:
+            return t
+        for wrong, correct in custom_corrections.items():
+            if wrong:
+                t = t.replace(wrong, correct)
+        return t
+
+    text = _apply_custom(text)
     for pattern, repl in _OCR_TERM_FIXES:
         text = pattern.sub(repl, text)
+    text = _apply_custom(text)
+    text = _fuzzy_correct_against_vocabulary(text, COMMON_REFORM_TERMS)
     return text
+
+
+def _fuzzy_correct_against_vocabulary(text: str, vocabulary: list[str], threshold: float = 0.78) -> str:
+    """text内の部分文字列を、語彙リストとの類似度でスキャンし、十分近ければ
+    正規の表記に置き換える（長い語彙から先に処理する）。
+    閾値は高め（0.78）にしてあり、誤って「既に正しい別の語彙」を別の語彙に
+    書き換えてしまう誤検出（例：クリーニング→コーキング）を避ける。
+    どの語彙にも完全一致する部分文字列は、対象外として一切書き換えない。
+    """
+    import difflib
+
+    vocab_set = set(vocabulary)
+    result = text
+    for term in sorted(vocabulary, key=len, reverse=True):
+        n = len(term)
+        if n < 3 or n > len(result):
+            continue
+        best_ratio = 0.0
+        best_start = -1
+        for start in range(len(result) - n + 1):
+            window = result[start:start + n]
+            if window == term:
+                best_start = -1
+                break  # 既に正しいので置換不要
+            if window in vocab_set:
+                continue  # 既に別の正しい語彙と完全一致するので触らない
+            ratio = difflib.SequenceMatcher(None, window, term).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_start = start
+        if best_start >= 0 and best_ratio >= threshold:
+            result = result[:best_start] + term + result[best_start + n:]
+    return result
 
 
 def extract_table_items_from_pdf(file_bytes: bytes) -> list[dict]:
@@ -346,7 +415,7 @@ def _looks_like_table_header(text: str) -> bool:
     return hits >= 2
 
 
-def extract_items_via_ocr(file_bytes: bytes) -> list[dict]:
+def extract_items_via_ocr(file_bytes: bytes, custom_corrections: dict[str, str] | None = None) -> list[dict]:
     import fitz  # PyMuPDF
 
     reader = get_easyocr_reader()
@@ -364,12 +433,12 @@ def extract_items_via_ocr(file_bytes: bytes) -> list[dict]:
                 continue
             parsed = parse_line_to_item(_fix_ocr_digit_confusions(text))
             if parsed:
-                parsed["品名"] = fix_common_ocr_terms(parsed["品名"])
+                parsed["品名"] = fix_common_ocr_terms(parsed["品名"], custom_corrections)
                 items.append(parsed)
     return items
 
 
-def extract_items_from_pdf(file_bytes: bytes) -> tuple[list[dict], str]:
+def extract_items_from_pdf(file_bytes: bytes, custom_corrections: dict[str, str] | None = None) -> tuple[list[dict], str]:
     """戻り値: (品目リスト, 使用した抽出方式)"""
     items = extract_table_items_from_pdf(file_bytes)
     if items:
@@ -379,7 +448,7 @@ def extract_items_from_pdf(file_bytes: bytes) -> tuple[list[dict], str]:
     if items:
         return items, "テキスト抽出"
 
-    items = extract_items_via_ocr(file_bytes)
+    items = extract_items_via_ocr(file_bytes, custom_corrections)
     return items, "OCR（画像認識）"
 
 
