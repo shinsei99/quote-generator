@@ -17,6 +17,7 @@ from openpyxl import load_workbook
 
 ITEM_NAME_KEYWORDS = ["品名", "品目", "名称", "商品名", "item", "description"]
 QTY_KEYWORDS = ["数量", "個数", "qty", "quantity"]
+UNIT_KEYWORDS = ["単位", "unit"]
 PRICE_KEYWORDS = ["単価", "価格", "unit price", "price"]
 AMOUNT_KEYWORDS = ["金額", "amount", "total"]
 
@@ -78,6 +79,7 @@ def parse_table(table: list[list]) -> list[dict]:
     header = [str(c or "").strip() for c in table[0]]
     col_name = find_col(header, ITEM_NAME_KEYWORDS)
     col_qty = find_col(header, QTY_KEYWORDS)
+    col_unit = find_col(header, UNIT_KEYWORDS)
     col_price = find_col(header, PRICE_KEYWORDS)
     col_amount = find_col(header, AMOUNT_KEYWORDS)
     if col_name is None or (col_qty is None and col_price is None and col_amount is None):
@@ -92,6 +94,7 @@ def parse_table(table: list[list]) -> list[dict]:
             continue
 
         qty = to_number(row[col_qty]) if col_qty is not None and col_qty < len(row) else None
+        unit = str(row[col_unit] or "").strip() if col_unit is not None and col_unit < len(row) else ""
         price = to_number(row[col_price]) if col_price is not None and col_price < len(row) else None
         amount = to_number(row[col_amount]) if col_amount is not None and col_amount < len(row) else None
 
@@ -109,7 +112,7 @@ def parse_table(table: list[list]) -> list[dict]:
         else:
             continue
 
-        rows.append({"品名": name, "数量": eff_qty, "元単価": round(eff_price, 2)})
+        rows.append({"品名": name, "数量": eff_qty, "単位": unit, "元単価": round(eff_price, 2)})
     return rows
 
 
@@ -139,7 +142,7 @@ def parse_line_to_item(line: str) -> dict | None:
     if price <= 0:
         return None
 
-    return {"品名": name, "数量": qty if qty > 0 else 1, "元単価": price}
+    return {"品名": name, "数量": qty if qty > 0 else 1, "単位": "", "元単価": price}
 
 
 def extract_table_items_from_pdf(file_bytes: bytes) -> list[dict]:
@@ -261,14 +264,15 @@ def extract_items_from_excel(file_bytes: bytes) -> list[dict]:
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
 
-    header_idx = col_name = col_qty = col_price = None
+    header_idx = col_name = col_qty = col_unit = col_price = None
     for i, row in enumerate(rows[:15]):
         texts = [str(c).strip() if c is not None else "" for c in row]
         cn = find_col(texts, ITEM_NAME_KEYWORDS)
         cq = find_col(texts, QTY_KEYWORDS)
+        cu = find_col(texts, UNIT_KEYWORDS)
         cp = find_col(texts, PRICE_KEYWORDS)
         if cn is not None and (cq is not None or cp is not None):
-            header_idx, col_name, col_qty, col_price = i, cn, cq, cp
+            header_idx, col_name, col_qty, col_unit, col_price = i, cn, cq, cu, cp
             break
 
     if header_idx is None:
@@ -282,10 +286,12 @@ def extract_items_from_excel(file_bytes: bytes) -> list[dict]:
         if name is None or str(name).strip() == "":
             continue
         qty = to_number(row[col_qty]) if col_qty is not None and col_qty < len(row) else None
+        unit = str(row[col_unit]).strip() if col_unit is not None and col_unit < len(row) and row[col_unit] is not None else ""
         price = to_number(row[col_price]) if col_price is not None and col_price < len(row) else None
         items.append({
             "品名": str(name).strip(),
             "数量": qty if qty is not None else 1,
+            "単位": unit,
             "元単価": price if price is not None else 0,
         })
     return items

@@ -38,7 +38,7 @@ st.title("🧾 見積書自動生成ツール")
 st.caption("取引先から受け取ったPDF/Excelの見積書を読み取り、上乗せ率を反映して自社テンプレートに転記します")
 
 if "items_df" not in st.session_state:
-    st.session_state.items_df = pd.DataFrame(columns=["品名", "数量", "元単価"])
+    st.session_state.items_df = pd.DataFrame(columns=["品名", "数量", "単位", "元単価"])
 if "last_uploaded_name" not in st.session_state:
     st.session_state.last_uploaded_name = None
 
@@ -55,7 +55,10 @@ if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name
             method = "Excel読み込み"
 
     if items:
-        st.session_state.items_df = pd.DataFrame(items)[["品名", "数量", "元単価"]]
+        df = pd.DataFrame(items)
+        if "単位" not in df.columns:
+            df["単位"] = ""
+        st.session_state.items_df = df[["品名", "数量", "単位", "元単価"]]
         st.success(f"{len(items)} 件の品目を読み取りました（方式: {method}）。内容を確認・修正してください。")
     else:
         st.warning("品目を自動検出できませんでした。下の表に手動で入力してください。")
@@ -65,7 +68,7 @@ st.subheader("📋 品目データ（編集可能）")
 st.caption("自動読み取りに誤りがある場合は、表のセルを直接クリックして修正・行の追加/削除ができます")
 
 if st.button("＋ 行を追加"):
-    new_row = pd.DataFrame([{"品名": "", "数量": 1, "元単価": 0}])
+    new_row = pd.DataFrame([{"品名": "", "数量": 1, "単位": "", "元単価": 0}])
     st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 
 edited_df = st.data_editor(
@@ -75,6 +78,7 @@ edited_df = st.data_editor(
     column_config={
         "品名": st.column_config.TextColumn("品名", width="large"),
         "数量": st.column_config.NumberColumn("数量", min_value=0, step=1),
+        "単位": st.column_config.TextColumn("単位", width="small"),
         "元単価": st.column_config.NumberColumn("元単価（円）", min_value=0, step=1),
     },
     key="items_editor",
@@ -97,6 +101,7 @@ with c_rate2:
 
 calc_df = edited_df.copy()
 calc_df["数量"] = pd.to_numeric(calc_df["数量"], errors="coerce").fillna(0)
+calc_df["単位"] = calc_df["単位"].fillna("") if "単位" in calc_df.columns else ""
 calc_df["元単価"] = pd.to_numeric(calc_df["元単価"], errors="coerce").fillna(0)
 # 上乗せ後単価・金額は消費税を含まない（税別）。小数点以下は切り捨て。
 calc_df["上乗せ後単価"] = (calc_df["元単価"] * (1 + markup_rate / 100)).apply(math.floor)
@@ -109,7 +114,7 @@ if calc_df.empty:
     subtotal = tax_amount = grand_total = 0
 else:
     st.dataframe(
-        calc_df[["品名", "数量", "元単価", "上乗せ後単価", "金額"]],
+        calc_df[["品名", "数量", "単位", "元単価", "上乗せ後単価", "金額"]],
         use_container_width=True,
     )
     subtotal = int(calc_df["金額"].sum())
@@ -148,7 +153,7 @@ st.divider()
 if calc_df.empty:
     st.button("📥 編集済み見積書をダウンロード", disabled=True, use_container_width=True)
 else:
-    items_payload = calc_df[["品名", "数量", "上乗せ後単価"]].to_dict("records")
+    items_payload = calc_df[["品名", "数量", "単位", "上乗せ後単価"]].to_dict("records")
     header_info = {
         "client": client,
         "issue_date": issue_date if issue_date else None,

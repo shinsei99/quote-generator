@@ -57,13 +57,21 @@ NORMAL_ALIGN = Alignment(horizontal="general", vertical="bottom")
 NO_FILL = PatternFill(fill_type=None)
 
 
+_DATA_NUMBER_FORMATS = {
+    cfg.COL_UNIT_PRICE: "#,##0",
+    cfg.COL_AMOUNT: "#,##0",
+}
+
+
 def _style_data_row(ws, row: int):
     """指定した1行を、品目データ行と同じ結合・罫線・フォントにする（流用元の太字や
     フォントサイズが残らないよう、フォント・配置・塗りつぶしも明示的にリセットする）。
     """
     for start_col, end_col in DATA_COL_SPECS:
         cell_range = f"{start_col}{row}:{end_col}{row}" if end_col else f"{start_col}{row}"
-        _set(ws, cell_range, font=NORMAL_FONT, fill=NO_FILL, align=NORMAL_ALIGN, border=BORDER)
+        number_format = _DATA_NUMBER_FORMATS.get(start_col)
+        _set(ws, cell_range, font=NORMAL_FONT, fill=NO_FILL, align=NORMAL_ALIGN, border=BORDER,
+             number_format=number_format)
 
 
 def _clear_row_range(ws, row_start: int, row_end: int):
@@ -219,17 +227,17 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
     overflow = max(0, len(items) - cfg.MAX_DATA_ROWS)
 
     if overflow > 0:
-        # 元の小計〜合計ブロック（結合済み）を解除し、通常のデータ行として再利用する
+        # 元の小計〜合計ブロック（結合済み）を解除する
         _clear_row_range(ws, cfg.SUBTOTAL_ROW, cfg.TOTAL_ROW + 1)
-        for row in range(cfg.SUBTOTAL_ROW, cfg.TOTAL_ROW + 2):
-            _style_data_row(ws, row)
 
         subtotal_row = cfg.SUBTOTAL_ROW + overflow
         tax_row = cfg.TAX_ROW + overflow
         total_row = cfg.TOTAL_ROW + overflow
 
-        # 元のブロックより下、新しい小計欄より上の行にもスタイルを適用
-        for row in range(cfg.TOTAL_ROW + 2, subtotal_row):
+        # あらかじめ罫線を用意した品目行より下、新しい小計欄より上の行は
+        # すべて通常のデータ行としてスタイルを適用する（途中に未装飾の
+        # 空白行を残さないよう、ギャップなく連続した範囲で処理する）
+        for row in range(cfg.DATA_START_ROW + cfg.MAX_DATA_ROWS, subtotal_row):
             _style_data_row(ws, row)
 
         _build_summary_block(ws, subtotal_row, tax_row, total_row, tax_rate=tax_rate)
@@ -242,6 +250,7 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
         amount = math.floor(qty * price)
         subtotal += amount
         ws[f"{cfg.COL_ITEM_NAME}{row}"] = item.get("品名", "")
+        ws[f"{cfg.COL_UNIT}{row}"] = item.get("単位", "")
         ws[f"{cfg.COL_QTY}{row}"] = qty
         ws[f"{cfg.COL_UNIT_PRICE}{row}"] = price
         ws[f"{cfg.COL_AMOUNT}{row}"] = amount
