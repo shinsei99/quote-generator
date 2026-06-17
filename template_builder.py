@@ -52,11 +52,18 @@ def _set(ws, cell_range: str, value=None, font=None, fill=None, align=None, bord
     return cell
 
 
+NORMAL_FONT = Font(size=11, bold=False)
+NORMAL_ALIGN = Alignment(horizontal="general", vertical="bottom")
+NO_FILL = PatternFill(fill_type=None)
+
+
 def _style_data_row(ws, row: int):
-    """指定した1行を、品目データ行と同じ結合・罫線スタイルにする。"""
+    """指定した1行を、品目データ行と同じ結合・罫線・フォントにする（流用元の太字や
+    フォントサイズが残らないよう、フォント・配置・塗りつぶしも明示的にリセットする）。
+    """
     for start_col, end_col in DATA_COL_SPECS:
         cell_range = f"{start_col}{row}:{end_col}{row}" if end_col else f"{start_col}{row}"
-        _set(ws, cell_range, border=BORDER)
+        _set(ws, cell_range, font=NORMAL_FONT, fill=NO_FILL, align=NORMAL_ALIGN, border=BORDER)
 
 
 def _clear_row_range(ws, row_start: int, row_end: int):
