@@ -16,17 +16,27 @@ import pdfplumber
 from openpyxl import load_workbook
 
 ITEM_NAME_KEYWORDS = ["品名", "品目", "名称", "商品名", "item", "description"]
-QTY_KEYWORDS = ["数量", "数 量", "個数", "qty", "quantity"]
+QTY_KEYWORDS = ["数量", "個数", "qty", "quantity"]
 PRICE_KEYWORDS = ["単価", "価格", "unit price", "price"]
+AMOUNT_KEYWORDS = ["金額", "amount", "total"]
 
 # 行内の「金額っぽい数字トークン」を抽出する正規表現（カンマ区切り・円・¥対応）
 NUM_RE = re.compile(r"[¥￥]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*円?")
 
 # 品目候補として扱わない行のキーワード（日付欄・合計行・連絡先など）
 EXCLUDE_LINE_KEYWORDS = [
-    "見積番号", "発行日", "御中", "TEL", "FAX", "〒", "合計", "小計",
-    "消費税", "税込", "税抜", "振込先", "備考", "有効期限",
+    "見積番号", "発行日", "御中", "様", "TEL", "FAX", "〒", "合計", "小計",
+    "消費税", "税込", "税抜", "振込先", "備考", "有効期限", "登録番号",
+    "工事件名", "工事場所", "工事概要", "工事期間", "支払条件", "次頁",
+    "Page", "page", "@", "印",
 ]
+
+
+def _normalize_text(s: str) -> str:
+    """全角/半角スペースを除去して比較しやすくする（「名　称」のような
+    見出しの中に挿入されたスペースでキーワード一致が崩れるのを防ぐ）。
+    """
+    return re.sub(r"[\s　]+", "", s).lower()
 
 _easyocr_reader = None
 
@@ -49,12 +59,17 @@ def to_number(value) -> float | None:
 
 
 def find_col(header_texts: list[str], keywords: list[str]) -> int | None:
-    for i, h in enumerate(header_texts):
-        h_lower = h.lower()
-        for kw in keywords:
-            if kw.lower() in h_lower:
+    norm_headers = [_normalize_text(h) for h in header_texts]
+    norm_keywords = [_normalize_text(k) for k in keywords]
+    for i, h in enumerate(norm_headers):
+        for kw in norm_keywords:
+            if kw and kw in h:
                 return i
     return None
+
+
+# 品目ではなく、小計/合計などの集計行・見出し行とみなして除外する品名キーワード
+_NON_ITEM_NAME_MARKERS = ("小計", "合計", "【", "】")
 
 
 def parse_table(table: list[list]) -> list[dict]:
@@ -64,7 +79,8 @@ def parse_table(table: list[list]) -> list[dict]:
     col_name = find_col(header, ITEM_NAME_KEYWORDS)
     col_qty = find_col(header, QTY_KEYWORDS)
     col_price = find_col(header, PRICE_KEYWORDS)
-    if col_name is None or (col_qty is None and col_price is None):
+    col_amount = find_col(header, AMOUNT_KEYWORDS)
+    if col_name is None or (col_qty is None and col_price is None and col_amount is None):
         return []
 
     rows = []
@@ -72,11 +88,28 @@ def parse_table(table: list[list]) -> list[dict]:
         if col_name >= len(row):
             continue
         name = str(row[col_name] or "").strip()
-        if not name:
+        if not name or any(m in name for m in _NON_ITEM_NAME_MARKERS):
             continue
+
         qty = to_number(row[col_qty]) if col_qty is not None and col_qty < len(row) else None
         price = to_number(row[col_price]) if col_price is not None and col_price < len(row) else None
-        rows.append({"品名": name, "数量": qty if qty is not None else 1, "元単価": price if price is not None else 0})
+        amount = to_number(row[col_amount]) if col_amount is not None and col_amount < len(row) else None
+
+        if qty is None and price is None and amount is None:
+            # 数量・単価・金額がすべて空＝小見出しなどの情報行なのでスキップ
+            continue
+
+        eff_qty = qty if qty else 1
+        if amount:
+            # 単価が空欄でも金額は入っていることがあるため、金額を優先して
+            # 単価を逆算する（金額が最終的に正しい数字であるケースが多いため）
+            eff_price = amount / eff_qty if eff_qty else amount
+        elif price is not None:
+            eff_price = price
+        else:
+            continue
+
+        rows.append({"品名": name, "数量": eff_qty, "元単価": round(eff_price, 2)})
     return rows
 
 
