@@ -141,6 +141,9 @@ def parse_table(table: list[list]) -> list[dict]:
     return rows
 
 
+_LEADING_LIST_NUMBER_RE = re.compile(r"^[0-9]+[\.\)、]\s*")
+
+
 def parse_line_to_item(line: str) -> dict | None:
     line = line.strip()
     if not line or len(line) < 2:
@@ -148,11 +151,16 @@ def parse_line_to_item(line: str) -> dict | None:
     if any(kw in line for kw in EXCLUDE_LINE_KEYWORDS):
         return None
 
-    numbers = list(NUM_RE.finditer(line))
+    # 「1.玄関」のような先頭の箇条書き番号は、品名の前の「最初の数字」として
+    # 誤検出され品名抽出を壊すため、品名探索の対象からは取り除いておく
+    list_prefix_match = _LEADING_LIST_NUMBER_RE.match(line)
+    search_line = line[list_prefix_match.end():] if list_prefix_match else line
+
+    numbers = list(NUM_RE.finditer(search_line))
     if len(numbers) < 2:
         return None
 
-    name = line[: numbers[0].start()].strip(" \t-:|　")
+    name = search_line[: numbers[0].start()].strip(" \t-:|　")
     if not name:
         return None
 
@@ -221,9 +229,11 @@ def _fix_ocr_digit_confusions(text: str) -> str:
     return _NUMLIKE_RE.sub(repl, text)
 
 
-def _group_ocr_results_into_lines(results, y_tolerance: float = 15.0) -> list[str]:
+def _group_ocr_results_into_lines(results, y_tolerance: float = 15.0) -> list[tuple[float, str]]:
     """EasyOCRの検出結果(座標+テキスト)を、同じ行（Y座標が近い）ごとに
     X座標順で連結し、表の1行のようなテキストに再構成する。
+    戻り値は (その行のY座標, 連結したテキスト) のリスト（Y座標で判定し、
+    宛先・住所など表より上にある行を除外できるようにするため）。
     """
     boxes = []
     for bbox, text, _conf in results:
@@ -233,24 +243,45 @@ def _group_ocr_results_into_lines(results, y_tolerance: float = 15.0) -> list[st
     boxes.sort(key=lambda b: (b[0], b[1]))
 
     rows: list[list[tuple[float, str]]] = []
+    row_ys: list[list[float]] = []
     current_row: list[tuple[float, str]] = []
+    current_row_ys: list[float] = []
     current_y = None
     for y, x, text in boxes:
         if current_y is None or abs(y - current_y) <= y_tolerance:
             current_row.append((x, text))
+            current_row_ys.append(y)
             current_y = y if current_y is None else (current_y + y) / 2
         else:
             rows.append(current_row)
+            row_ys.append(current_row_ys)
             current_row = [(x, text)]
+            current_row_ys = [y]
             current_y = y
     if current_row:
         rows.append(current_row)
+        row_ys.append(current_row_ys)
 
     lines = []
-    for row in rows:
+    for row, ys in zip(rows, row_ys):
         row.sort(key=lambda t: t[0])
-        lines.append("  ".join(t[1] for t in row))
+        text = "  ".join(t[1] for t in row)
+        lines.append((sum(ys) / len(ys), text))
     return lines
+
+
+OCR_ZOOM = 4.0  # 高いほど文字認識精度は上がるが処理時間も伸びる（4倍で約300dpi相当）
+
+
+# 品目テーブルの列見出し行を見つけるためのキーワード（2つ以上一致した行を
+# 見出しとみなす）。これより前（宛先・住所・郵便番号・日付など）は対象外にする。
+_HEADER_LINE_KEYWORDS = ["品名", "名称", "数量", "単価", "金額"]
+
+
+def _looks_like_table_header(text: str) -> bool:
+    norm = _normalize_text(text)
+    hits = sum(1 for kw in _HEADER_LINE_KEYWORDS if _normalize_text(kw) in norm)
+    return hits >= 2
 
 
 def extract_items_via_ocr(file_bytes: bytes) -> list[dict]:
@@ -259,12 +290,17 @@ def extract_items_via_ocr(file_bytes: bytes) -> list[dict]:
     reader = get_easyocr_reader()
     items = []
     doc = fitz.open(stream=file_bytes, filetype="pdf")
+    header_found = False
     for page in doc:
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5))
+        pix = page.get_pixmap(matrix=fitz.Matrix(OCR_ZOOM, OCR_ZOOM))
         img_bytes = pix.tobytes("png")
         results = reader.readtext(img_bytes, detail=1, paragraph=False)
-        for line in _group_ocr_results_into_lines(results):
-            parsed = parse_line_to_item(_fix_ocr_digit_confusions(line))
+        for _y, text in _group_ocr_results_into_lines(results, y_tolerance=15.0 * OCR_ZOOM / 2.5):
+            if not header_found:
+                if _looks_like_table_header(text):
+                    header_found = True
+                continue
+            parsed = parse_line_to_item(_fix_ocr_digit_confusions(text))
             if parsed:
                 items.append(parsed)
     return items
