@@ -1,4 +1,5 @@
 import datetime
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -82,38 +83,65 @@ st.session_state.items_df = edited_df
 
 st.divider()
 
-markup_rate = st.number_input(
-    "上乗せ率（％）", min_value=0.0, max_value=500.0, value=10.0, step=0.5,
-    help="例：10%なら元の単価を1.1倍にします",
-)
+c_rate1, c_rate2 = st.columns(2)
+with c_rate1:
+    markup_rate = st.number_input(
+        "上乗せ率（％）", min_value=0.0, max_value=500.0, value=10.0, step=0.5,
+        help="例：10%なら元の単価を1.1倍にします（本文の単価・金額は消費税別で計算します）",
+    )
+with c_rate2:
+    tax_rate = st.number_input(
+        "消費税率（％）", min_value=0.0, max_value=100.0, value=10.0, step=0.5,
+        help="小計に対してこの税率で消費税を計算し、合計の直前に表示します",
+    )
 
 calc_df = edited_df.copy()
 calc_df["数量"] = pd.to_numeric(calc_df["数量"], errors="coerce").fillna(0)
 calc_df["元単価"] = pd.to_numeric(calc_df["元単価"], errors="coerce").fillna(0)
-calc_df["上乗せ後単価"] = (calc_df["元単価"] * (1 + markup_rate / 100)).round(0)
-calc_df["金額"] = calc_df["数量"] * calc_df["上乗せ後単価"]
+# 上乗せ後単価・金額は消費税を含まない（税別）。小数点以下は切り捨て。
+calc_df["上乗せ後単価"] = (calc_df["元単価"] * (1 + markup_rate / 100)).apply(math.floor)
+calc_df["金額"] = (calc_df["数量"] * calc_df["上乗せ後単価"]).apply(math.floor)
 calc_df = calc_df[calc_df["品名"].astype(str).str.strip() != ""].reset_index(drop=True)
 
-st.subheader("💰 上乗せ後の計算結果")
+st.subheader("💰 上乗せ後の計算結果（税別）")
 if calc_df.empty:
     st.info("品目を入力すると、上乗せ後の金額がここに表示されます")
+    subtotal = tax_amount = grand_total = 0
 else:
     st.dataframe(
         calc_df[["品名", "数量", "元単価", "上乗せ後単価", "金額"]],
         use_container_width=True,
     )
-    grand_total = calc_df["金額"].sum()
-    st.markdown(f"<div class='total-box'>合計金額：¥{grand_total:,.0f}</div>", unsafe_allow_html=True)
+    subtotal = int(calc_df["金額"].sum())
+    tax_amount = math.floor(subtotal * tax_rate / 100)
+    grand_total = subtotal + tax_amount
+    st.markdown(
+        f"<div class='info-card'>"
+        f"小計（税別）：¥{subtotal:,.0f}　／　"
+        f"消費税（{tax_rate:g}%）：¥{tax_amount:,.0f}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"<div class='total-box'>合計金額（税込）：¥{grand_total:,.0f}</div>", unsafe_allow_html=True)
 
 st.divider()
-st.subheader("📄 見積書情報")
+st.subheader("📄 宛先・発行日")
 c1, c2 = st.columns(2)
 with c1:
     client = st.text_input("宛先（会社名・氏名）")
-    subject = st.text_input("件名")
 with c2:
     issue_date = st.date_input("発行日", value=datetime.date.today())
-    quote_no = st.text_input("見積番号")
+
+st.subheader("🏢 発行元（自社）情報")
+c3, c4 = st.columns(2)
+with c3:
+    issuer_name = st.text_input("発行元 会社名")
+    issuer_address = st.text_input("発行元 住所")
+    issuer_license = st.text_input("許可番号など（任意）")
+with c4:
+    issuer_tel = st.text_input("発行元 TEL")
+    issuer_fax = st.text_input("発行元 FAX")
+    issuer_reg_no = st.text_input("インボイス登録番号")
 
 st.divider()
 
@@ -123,11 +151,17 @@ else:
     items_payload = calc_df[["品名", "数量", "上乗せ後単価"]].to_dict("records")
     header_info = {
         "client": client,
-        "subject": subject,
-        "issue_date": issue_date.isoformat() if issue_date else "",
-        "quote_no": quote_no,
+        "issue_date": issue_date if issue_date else None,
     }
-    output_bytes = fill_template(items_payload, header_info, TEMPLATE_PATH)
+    issuer_info = {
+        "name": issuer_name,
+        "address": issuer_address,
+        "tel": issuer_tel,
+        "fax": issuer_fax,
+        "registration_no": issuer_reg_no,
+        "license": issuer_license,
+    }
+    output_bytes = fill_template(items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH)
     st.download_button(
         "📥 編集済み見積書をダウンロード",
         data=output_bytes,
