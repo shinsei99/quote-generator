@@ -86,6 +86,13 @@ if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name
         df["単位"] = df["単位"].fillna("")
         df["数量"] = pd.to_numeric(df["数量"], errors="coerce").fillna(0)
         df["元単価"] = pd.to_numeric(df["元単価"], errors="coerce").fillna(0)
+
+        # 値引行は表には出さず、別途「値引きを反映する」設定で扱う
+        is_discount = (df["種別"] == "品目") & (df["品名"] == "値引")
+        detected_discount = float(-df.loc[is_discount, "元単価"].sum()) if is_discount.any() else 0.0
+        st.session_state.detected_discount = detected_discount
+        df = df[~is_discount]
+
         st.session_state.items_df = df[ITEM_COLUMNS]
         n_sections = (df["種別"] == "工事区分").sum()
         n_breaks = (df["種別"] == "小計区切り").sum()
@@ -94,11 +101,16 @@ if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name
             note_parts.append(f"工事区分の見出し {n_sections} 件")
         if n_breaks:
             note_parts.append(f"小計区切り {n_breaks} 件")
+        if detected_discount:
+            note_parts.append(f"値引き {detected_discount:,.0f}円を検出（反映する場合は下のチェックを入れてください）")
         note = f"（{'、'.join(note_parts)}）" if note_parts else ""
         st.success(f"{len(items)} 件読み取りました（方式: {method}）{note}。内容を確認・修正してください。")
     else:
         st.warning("品目を自動検出できませんでした。下の表に手動で入力してください。")
     st.session_state.last_uploaded_name = uploaded.name
+
+if "detected_discount" not in st.session_state:
+    st.session_state.detected_discount = 0.0
 
 st.subheader("📋 品目データ（編集可能）")
 st.caption(
@@ -152,6 +164,18 @@ with c_rate2:
         help="小計に対してこの税率で消費税を計算し、合計の直前に表示します",
     )
 
+dc1, dc2 = st.columns([1, 2])
+with dc1:
+    apply_discount = st.checkbox(
+        "値引きを反映する", value=False,
+        help="デフォルトでは反映しません。元の見積書から値引きが検出された場合、ここにチェックを入れると小計から差し引きます（上乗せの対象外）。",
+    )
+with dc2:
+    discount_amount = st.number_input(
+        "値引き額（円）", min_value=0.0, value=st.session_state.detected_discount, step=100.0,
+        disabled=not apply_discount,
+    )
+
 calc_df = edited_df.copy()
 calc_df["種別"] = calc_df["種別"].fillna("品目") if "種別" in calc_df.columns else "品目"
 calc_df.loc[calc_df["種別"] == "", "種別"] = "品目"
@@ -169,6 +193,14 @@ calc_df.loc[is_item, "金額"] = (calc_df.loc[is_item, "数量"] * calc_df.loc[i
 calc_df = calc_df[
     (calc_df["品名"].astype(str).str.strip() != "") | (calc_df["種別"] == "小計区切り")
 ].reset_index(drop=True)
+
+if apply_discount and discount_amount > 0:
+    # 値引きは上乗せ率の対象外（元の値引き額をそのまま差し引く）
+    discount_row = pd.DataFrame([{
+        "種別": "品目", "品名": "値引", "規格": "", "数量": 1, "単位": "",
+        "元単価": -discount_amount, "上乗せ後単価": -discount_amount, "金額": -discount_amount,
+    }])
+    calc_df = pd.concat([calc_df, discount_row], ignore_index=True)
 
 st.subheader("💰 上乗せ後の計算結果（税別）")
 if calc_df.empty:

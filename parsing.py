@@ -218,6 +218,28 @@ def parse_line_to_item(line: str) -> dict | None:
     return {"種別": "品目", "品名": name, "規格": "", "数量": qty if qty > 0 else 1, "単位": "", "元単価": price}
 
 
+# OCRがリフォーム見積書でよく誤読する単語の補正辞書（パラメータ調整では
+# 改善しない、フォント固有の字形誤認識を補う最後の手段）。
+# あくまで既知の頻出パターンのみを対象とし、過剰な書き換えは避ける。
+_OCR_TERM_FIXES: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"[鮎船則脂刈]替"), "貼替"),          # 貼替 ⇔ 鮎替/船替/則替/脂替/刈替
+    (re.compile(r"クス(?=貼替)"), "クロス"),           # クス貼替 → クロス貼替
+    (re.compile(r"(ツ|ゆ|Y|ソ)ト木"), "ソフト巾木"),    # ソフト巾木の誤読バリエーション
+    (re.compile(r"諸経[葵萎]"), "諸経費"),
+    (re.compile(r"^遊面所"), "洗面所"),
+    (re.compile(r"^ト[ルI](?=\s|$|　)"), "トイレ"),
+]
+
+
+def fix_common_ocr_terms(text: str) -> str:
+    """OCR由来の品名に対して、頻出する字形誤認識を補正する。
+    デジタルPDF/Excelから取得したテキストには適用しない（必要ないため）。
+    """
+    for pattern, repl in _OCR_TERM_FIXES:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def extract_table_items_from_pdf(file_bytes: bytes) -> list[dict]:
     items = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
@@ -342,6 +364,7 @@ def extract_items_via_ocr(file_bytes: bytes) -> list[dict]:
                 continue
             parsed = parse_line_to_item(_fix_ocr_digit_confusions(text))
             if parsed:
+                parsed["品名"] = fix_common_ocr_terms(parsed["品名"])
                 items.append(parsed)
     return items
 
