@@ -9,6 +9,21 @@
 
 TEMPLATE_PATH = "template.xlsx"
 SHEET_NAME = "見積書"
+INVOICE_SHEET_NAME = "請求書"
+
+# 見積書・請求書で異なる固定文言（レイアウトは共通）
+DOCUMENT_TITLES = {
+    SHEET_NAME: "御　見　積　書",
+    INVOICE_SHEET_NAME: "御　請　求　書",
+}
+DOCUMENT_GREETINGS = {
+    SHEET_NAME: "下記の通りお見積申し上げますので何卒宜しくお願い致します。",
+    INVOICE_SHEET_NAME: "下記の通りご請求申し上げますので何卒宜しくお願い致します。",
+}
+DOCUMENT_TOTAL_LABELS = {
+    SHEET_NAME: "見積金額",
+    INVOICE_SHEET_NAME: "請求金額",
+}
 
 # ── タイトル・宛先 ───────────────────────────────────────────
 CELL_TITLE = "A1"          # 結合 A1:N2
@@ -54,3 +69,9 @@ TAX_RATE_COL = "G"          # 消費税率の数値（例: 10）
 TAX_RATE_UNIT_COL = "H"     # 「％」
 VALUE_COL_START = "J"       # 各行の金額表示開始列（結合 J:K）
 VALUE_COL_END = "K"
+
+# ── 振込先（請求書のみ） ─────────────────────────────────────
+BANK_ROW_OFFSET = 2          # 合計行（2行分）の直後からのオフセット
+CELL_BANK_LABEL_COL = "A"    # 「振込先」
+CELL_BANK_INFO_COL_START = "C"   # 振込先の詳細（結合 C:N）
+CELL_BANK_INFO_COL_END = "N"

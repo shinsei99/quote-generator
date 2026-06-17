@@ -108,23 +108,23 @@ def _build_summary_block(ws, subtotal_row: int, tax_row: int, total_row: int, ta
          border=BORDER, number_format="#,##0")
 
 
-def ensure_template_exists(path: Path | None = None) -> Path:
-    """template.xlsx が無ければ、ユーザー提供の見積書テンプレートを参考にしたサンプルを新規作成する。"""
-    path = Path(path) if path else Path(cfg.TEMPLATE_PATH)
-    if path.exists():
-        return path
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = cfg.SHEET_NAME
+def _build_sheet(wb, sheet_name: str):
+    """見積書・請求書で共通のシートレイアウトを作る（タイトル・挨拶文・金額
+    ラベルは sheet_name に応じて切り替える）。請求書シートのみ振込先欄を追加する。
+    """
+    ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(sheet_name)
 
     title_font = Font(size=20, bold=True)
     header_font = Font(bold=True)
     small_font = Font(size=9)
     bold_font = Font(bold=True)
 
+    title_text = cfg.DOCUMENT_TITLES.get(sheet_name, sheet_name)
+    greeting_text = cfg.DOCUMENT_GREETINGS.get(sheet_name, "")
+    total_label = cfg.DOCUMENT_TOTAL_LABELS.get(sheet_name, "合計金額")
+
     # タイトル
-    _set(ws, "A1:N2", "御　見　積　書", font=title_font, align=Alignment(horizontal="center", vertical="center"))
+    _set(ws, "A1:N2", title_text, font=title_font, align=Alignment(horizontal="center", vertical="center"))
 
     # 宛先
     _set(ws, f"{cfg.CELL_CLIENT}:D4", "（宛先を入力）", font=Font(size=14),
@@ -136,7 +136,7 @@ def ensure_template_exists(path: Path | None = None) -> Path:
     _set(ws, f"{cfg.CELL_ISSUER_LICENSE}:N6", "", font=small_font, align=Alignment(horizontal="right"))
 
     # 挨拶文
-    _set(ws, cfg.CELL_GREETING, "下記の通りお見積申し上げますので何卒宜しくお願い致します。")
+    _set(ws, cfg.CELL_GREETING, greeting_text)
 
     # 発行元情報
     _set(ws, f"{cfg.CELL_ISSUER_NAME}:N8", "", font=bold_font, align=Alignment(horizontal="right"))
@@ -145,8 +145,8 @@ def ensure_template_exists(path: Path | None = None) -> Path:
     _set(ws, cfg.CELL_ISSUER_FAX, "", align=Alignment(horizontal="right"))
     _set(ws, cfg.CELL_ISSUER_REG_NO, "", align=Alignment(horizontal="right"))
 
-    # 見積金額サマリー
-    _set(ws, f"{cfg.CELL_TOTAL_LABEL}:D14", "見積金額", font=header_font, align=CENTER, border=BORDER)
+    # 金額サマリー（見積金額／請求金額）
+    _set(ws, f"{cfg.CELL_TOTAL_LABEL}:D14", total_label, font=header_font, align=CENTER, border=BORDER)
     _set(ws, f"{cfg.CELL_TOTAL_DISPLAY}:G14", 0, font=Font(size=16, bold=True),
          align=Alignment(horizontal="right", vertical="center"), border=BORDER, number_format='#,##0"円（税込）"')
 
@@ -181,12 +181,41 @@ def ensure_template_exists(path: Path | None = None) -> Path:
     # 小計・消費税・合計
     _build_summary_block(ws, cfg.SUBTOTAL_ROW, cfg.TAX_ROW, cfg.TOTAL_ROW)
 
+    # 振込先（請求書のみ）
+    if sheet_name == cfg.INVOICE_SHEET_NAME:
+        _build_bank_row(ws, cfg.TOTAL_ROW + cfg.BANK_ROW_OFFSET)
+
     widths = {
         "A": 10, "B": 8, "C": 8, "D": 8, "E": 8, "F": 8,
         "G": 8, "H": 6, "I": 10, "J": 8, "K": 8, "L": 8, "M": 8, "N": 10,
     }
     for col, w in widths.items():
         ws.column_dimensions[col].width = w
+
+    return ws
+
+
+def _build_bank_row(ws, row: int):
+    """振込先（銀行名・支店・口座番号など）の行を作る。"""
+    header_font = Font(bold=True)
+    _set(ws, f"{cfg.CELL_BANK_LABEL_COL}{row}", "振込先", font=header_font,
+         align=Alignment(horizontal="left", vertical="center"))
+    _set(ws, f"{cfg.CELL_BANK_INFO_COL_START}{row}:{cfg.CELL_BANK_INFO_COL_END}{row}", "",
+         align=Alignment(horizontal="left", vertical="center"))
+
+
+def ensure_template_exists(path: Path | None = None) -> Path:
+    """template.xlsx が無ければ、ユーザー提供の見積書・請求書テンプレートを
+    参考にしたサンプルを新規作成する（「見積書」「請求書」の2シート構成）。
+    """
+    path = Path(path) if path else Path(cfg.TEMPLATE_PATH)
+    if path.exists():
+        return path
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    _build_sheet(wb, cfg.SHEET_NAME)
+    _build_sheet(wb, cfg.INVOICE_SHEET_NAME)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
@@ -253,18 +282,26 @@ def _build_render_lines(items: list[dict]) -> tuple[list[dict], int]:
 
 
 def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
-                   tax_rate: float, template_path: Path | None = None) -> bytes:
+                   tax_rate: float, template_path: Path | None = None,
+                   document_type: str | None = None, bank_info: str = "") -> bytes:
     """items: [{"種別","品名","規格","数量","単位","上乗せ後単価"}]（税別）を
     template に流し込み、小計・消費税（小数点以下切り捨て）・合計まで計算して
     bytes を返す。「種別」が"工事区分"の行は品名のみの見出し行として出力され、
     元の見積書が工事箇所ごとに分かれている場合はその区切りで小計が入る。
 
+    document_type で "見積書"（既定）か "請求書" のどちらのシートに書き込むか
+    を選べる。請求書の場合は bank_info（振込先）も書き込む。
+
     出力行数（見出し・小計を含む）があらかじめ用意された行数（MAX_DATA_ROWS）
-    を超える場合は、小計・消費税・合計欄を必要な分だけ下にずらして衝突を避ける。
+    を超える場合は、小計・消費税・合計欄（請求書では振込先欄も）を必要な分
+    だけ下にずらして衝突を避ける。
     """
+    document_type = document_type or cfg.SHEET_NAME
+    is_invoice = document_type == cfg.INVOICE_SHEET_NAME
+
     template_path = Path(template_path) if template_path else Path(cfg.TEMPLATE_PATH)
     wb = load_workbook(template_path)
-    ws = wb[cfg.SHEET_NAME] if cfg.SHEET_NAME in wb.sheetnames else wb.active
+    ws = wb[document_type] if document_type in wb.sheetnames else wb.active
 
     if header_info.get("client"):
         ws[cfg.CELL_CLIENT] = header_info["client"]
@@ -287,15 +324,18 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
     render_lines, subtotal = _build_render_lines(items)
 
     subtotal_row, tax_row, total_row = cfg.SUBTOTAL_ROW, cfg.TAX_ROW, cfg.TOTAL_ROW
+    bank_row = cfg.TOTAL_ROW + cfg.BANK_ROW_OFFSET
     overflow = max(0, len(render_lines) - cfg.MAX_DATA_ROWS)
 
     if overflow > 0:
-        # 元の小計〜合計ブロック（結合済み）を解除する
-        _clear_row_range(ws, cfg.SUBTOTAL_ROW, cfg.TOTAL_ROW + 1)
+        # 元の小計〜合計（請求書なら振込先まで）ブロックを解除する
+        old_block_end = bank_row if is_invoice else cfg.TOTAL_ROW + 1
+        _clear_row_range(ws, cfg.SUBTOTAL_ROW, old_block_end)
 
         subtotal_row = cfg.SUBTOTAL_ROW + overflow
         tax_row = cfg.TAX_ROW + overflow
         total_row = cfg.TOTAL_ROW + overflow
+        bank_row = total_row + cfg.BANK_ROW_OFFSET
 
         # あらかじめ罫線を用意した品目行より下、新しい小計欄より上の行は
         # すべて通常のデータ行としてスタイルを適用する（途中に未装飾の
@@ -304,6 +344,8 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
             _style_data_row(ws, row)
 
         _build_summary_block(ws, subtotal_row, tax_row, total_row, tax_rate=tax_rate)
+        if is_invoice:
+            _build_bank_row(ws, bank_row)
 
     bold = Font(bold=True)
     for i, line in enumerate(render_lines):
@@ -335,6 +377,9 @@ def fill_template(items: list[dict], header_info: dict, issuer_info: dict,
     ws[f"{cfg.VALUE_COL_START}{tax_row}"] = tax_amount
     ws[f"{cfg.VALUE_COL_START}{total_row}"] = grand_total
     ws[cfg.CELL_TOTAL_DISPLAY] = grand_total
+
+    if is_invoice and bank_info:
+        ws[f"{cfg.CELL_BANK_INFO_COL_START}{bank_row}"] = bank_info
 
     buf = io.BytesIO()
     wb.save(buf)

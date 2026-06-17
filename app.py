@@ -19,7 +19,7 @@ DATA_DIR = BASE_DIR / "data"
 ISSUERS_CSV = DATA_DIR / "issuers.csv"
 DATA_DIR.mkdir(exist_ok=True)
 
-ISSUER_FIELDS = ["name", "address", "tel", "fax", "registration_no", "license"]
+ISSUER_FIELDS = ["name", "address", "tel", "fax", "registration_no", "license", "bank_info"]
 EMPTY_ISSUER = {f: "" for f in ISSUER_FIELDS}
 
 
@@ -237,6 +237,11 @@ with c4:
     issuer_fax = st.text_input("発行元 FAX", value=p["fax"], key=f"issuer_fax_{v}")
     issuer_reg_no = st.text_input("インボイス登録番号", value=p["registration_no"], key=f"issuer_reg_no_{v}")
 
+issuer_bank_info = st.text_input(
+    "振込先（請求書に記載・任意）", value=p["bank_info"], key=f"issuer_bank_info_{v}",
+    placeholder="例：○○銀行　○○支店　普通　1234567　カ）○○商事",
+)
+
 if st.button("💾 この発行元情報を保存"):
     if not issuer_name.strip():
         st.error("会社名を入力してください")
@@ -244,6 +249,7 @@ if st.button("💾 この発行元情報を保存"):
         save_issuer({
             "name": issuer_name.strip(), "address": issuer_address, "tel": issuer_tel,
             "fax": issuer_fax, "registration_no": issuer_reg_no, "license": issuer_license,
+            "bank_info": issuer_bank_info,
         })
         st.success(f"「{issuer_name}」の発行元情報を保存しました。次回から会社名で呼び出せます。")
         st.rerun()
@@ -251,7 +257,11 @@ if st.button("💾 この発行元情報を保存"):
 st.divider()
 
 if calc_df.empty:
-    st.button("📥 編集済み見積書をダウンロード", disabled=True, use_container_width=True)
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.button("📥 見積書をダウンロード", disabled=True, use_container_width=True)
+    with dl2:
+        st.button("🧾 請求書をダウンロード", disabled=True, use_container_width=True)
 else:
     items_payload = calc_df[["種別", "品名", "規格", "数量", "単位", "上乗せ後単価"]].to_dict("records")
     header_info = {
@@ -266,12 +276,30 @@ else:
         "registration_no": issuer_reg_no,
         "license": issuer_license,
     }
-    output_bytes = fill_template(items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH)
-    st.download_button(
-        "📥 編集済み見積書をダウンロード",
-        data=output_bytes,
-        file_name=f"見積書_{datetime.date.today().isoformat()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-        use_container_width=True,
-    )
+
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        quote_bytes = fill_template(
+            items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH,
+            document_type=cfg.SHEET_NAME,
+        )
+        st.download_button(
+            "📥 見積書をダウンロード",
+            data=quote_bytes,
+            file_name=f"見積書_{datetime.date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True,
+        )
+    with dl2:
+        invoice_bytes = fill_template(
+            items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH,
+            document_type=cfg.INVOICE_SHEET_NAME, bank_info=issuer_bank_info,
+        )
+        st.download_button(
+            "🧾 請求書をダウンロード",
+            data=invoice_bytes,
+            file_name=f"請求書_{datetime.date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
