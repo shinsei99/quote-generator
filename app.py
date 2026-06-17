@@ -1,0 +1,138 @@
+import datetime
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+import template_config as cfg
+from parsing import extract_items_from_excel, extract_items_from_pdf
+from template_builder import ensure_template_exists, fill_template
+
+st.set_page_config(page_title="見積書自動生成ツール", page_icon="🧾", layout="wide")
+
+BASE_DIR = Path(__file__).parent
+TEMPLATE_PATH = BASE_DIR / cfg.TEMPLATE_PATH
+ensure_template_exists(TEMPLATE_PATH)
+
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #f4f8fb; }
+    .info-card {
+        background: white; border-radius: 14px; padding: 16px 22px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 14px;
+    }
+    .total-box {
+        background: linear-gradient(90deg,#0f172a,#1e293b); color: white;
+        padding: 18px 24px; border-radius: 12px; font-size: 1.4rem; font-weight: 700;
+        margin: 12px 0;
+    }
+    h1, h2, h3 { color: #0f172a; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("🧾 見積書自動生成ツール")
+st.caption("取引先から受け取ったPDF/Excelの見積書を読み取り、上乗せ率を反映して自社テンプレートに転記します")
+
+if "items_df" not in st.session_state:
+    st.session_state.items_df = pd.DataFrame(columns=["品名", "数量", "元単価"])
+if "last_uploaded_name" not in st.session_state:
+    st.session_state.last_uploaded_name = None
+
+uploaded = st.file_uploader("見積書をアップロード（PDF または Excel）", type=["pdf", "xlsx"])
+
+if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name:
+    file_bytes = uploaded.read()
+    if uploaded.name.lower().endswith(".pdf"):
+        with st.spinner("PDFを解析しています…（スキャン画像の場合はOCRのため時間がかかることがあります）"):
+            items, method = extract_items_from_pdf(file_bytes)
+    else:
+        with st.spinner("Excelを解析しています…"):
+            items = extract_items_from_excel(file_bytes)
+            method = "Excel読み込み"
+
+    if items:
+        st.session_state.items_df = pd.DataFrame(items)[["品名", "数量", "元単価"]]
+        st.success(f"{len(items)} 件の品目を読み取りました（方式: {method}）。内容を確認・修正してください。")
+    else:
+        st.warning("品目を自動検出できませんでした。下の表に手動で入力してください。")
+    st.session_state.last_uploaded_name = uploaded.name
+
+st.subheader("📋 品目データ（編集可能）")
+st.caption("自動読み取りに誤りがある場合は、表のセルを直接クリックして修正・行の追加/削除ができます")
+
+if st.button("＋ 行を追加"):
+    new_row = pd.DataFrame([{"品名": "", "数量": 1, "元単価": 0}])
+    st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
+
+edited_df = st.data_editor(
+    st.session_state.items_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "品名": st.column_config.TextColumn("品名", width="large"),
+        "数量": st.column_config.NumberColumn("数量", min_value=0, step=1),
+        "元単価": st.column_config.NumberColumn("元単価（円）", min_value=0, step=1),
+    },
+    key="items_editor",
+)
+st.session_state.items_df = edited_df
+
+st.divider()
+
+markup_rate = st.number_input(
+    "上乗せ率（％）", min_value=0.0, max_value=500.0, value=10.0, step=0.5,
+    help="例：10%なら元の単価を1.1倍にします",
+)
+
+calc_df = edited_df.copy()
+calc_df["数量"] = pd.to_numeric(calc_df["数量"], errors="coerce").fillna(0)
+calc_df["元単価"] = pd.to_numeric(calc_df["元単価"], errors="coerce").fillna(0)
+calc_df["上乗せ後単価"] = (calc_df["元単価"] * (1 + markup_rate / 100)).round(0)
+calc_df["金額"] = calc_df["数量"] * calc_df["上乗せ後単価"]
+calc_df = calc_df[calc_df["品名"].astype(str).str.strip() != ""].reset_index(drop=True)
+
+st.subheader("💰 上乗せ後の計算結果")
+if calc_df.empty:
+    st.info("品目を入力すると、上乗せ後の金額がここに表示されます")
+else:
+    st.dataframe(
+        calc_df[["品名", "数量", "元単価", "上乗せ後単価", "金額"]],
+        use_container_width=True,
+    )
+    grand_total = calc_df["金額"].sum()
+    st.markdown(f"<div class='total-box'>合計金額：¥{grand_total:,.0f}</div>", unsafe_allow_html=True)
+
+st.divider()
+st.subheader("📄 見積書情報")
+c1, c2 = st.columns(2)
+with c1:
+    client = st.text_input("宛先（会社名・氏名）")
+    subject = st.text_input("件名")
+with c2:
+    issue_date = st.date_input("発行日", value=datetime.date.today())
+    quote_no = st.text_input("見積番号")
+
+st.divider()
+
+if calc_df.empty:
+    st.button("📥 編集済み見積書をダウンロード", disabled=True, use_container_width=True)
+else:
+    items_payload = calc_df[["品名", "数量", "上乗せ後単価"]].to_dict("records")
+    header_info = {
+        "client": client,
+        "subject": subject,
+        "issue_date": issue_date.isoformat() if issue_date else "",
+        "quote_no": quote_no,
+    }
+    output_bytes = fill_template(items_payload, header_info, TEMPLATE_PATH)
+    st.download_button(
+        "📥 編集済み見積書をダウンロード",
+        data=output_bytes,
+        file_name=f"見積書_{datetime.date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True,
+    )
