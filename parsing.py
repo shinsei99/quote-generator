@@ -143,11 +143,28 @@ def parse_table(table: list[list]) -> list[dict]:
 
 _LEADING_LIST_NUMBER_RE = re.compile(r"^[0-9]+[\.\)、]\s*")
 
+# 「式」「台」など、数量1件分をまとめて計上する単位（単価が空欄で、
+# 数字が1つ（金額のみ）しか出てこない行を救済するために使う）
+_LUMP_SUM_UNIT_WORDS = ("式", "台", "ｾｯﾄ", "セット", "本", "枚", "箇所", "か所", "件")
+_LUMP_SUM_UNIT_RE = re.compile("(" + "|".join(_LUMP_SUM_UNIT_WORDS) + r")\s*$")
+
+# 値引・割引行（マイナス金額として品目に取り込む）
+_DISCOUNT_KEYWORDS = ("値引", "割引")
+_NEGATIVE_NUM_RE = re.compile(r"[−\-－]\s*([0-9][0-9,]*(?:\.[0-9]+)?)")
+
 
 def parse_line_to_item(line: str) -> dict | None:
     line = line.strip()
     if not line or len(line) < 2:
         return None
+    if any(kw in line for kw in _DISCOUNT_KEYWORDS):
+        m = _NEGATIVE_NUM_RE.search(line) or NUM_RE.search(line)
+        if not m:
+            return None
+        amount = float(m.group(1).replace(",", ""))
+        if amount <= 0:
+            return None
+        return {"種別": "品目", "品名": "値引", "規格": "", "数量": 1, "単位": "", "元単価": -amount}
     if any(kw in line for kw in EXCLUDE_LINE_KEYWORDS):
         return None
 
@@ -157,6 +174,26 @@ def parse_line_to_item(line: str) -> dict | None:
     search_line = line[list_prefix_match.end():] if list_prefix_match else line
 
     numbers = list(NUM_RE.finditer(search_line))
+
+    if len(numbers) == 1:
+        # 数字が金額しか無くても、直前に「式」「台」等の単位らしき語があれば
+        # 数量1の一括計上とみなして救済する（OCRで数量の"1"だけ読み落とした
+        # 場合などに有効）
+        before = search_line[: numbers[0].start()]
+        if not _LUMP_SUM_UNIT_RE.search(before.strip()):
+            return None
+        name = before.strip(" \t-:|　")
+        # 末尾の単位語を品名から切り離す
+        m = _LUMP_SUM_UNIT_RE.search(name)
+        if m:
+            name = name[: m.start()].strip(" \t-:|　")
+        if not name:
+            return None
+        amount = float(numbers[0].group(1).replace(",", ""))
+        if amount <= 0:
+            return None
+        return {"種別": "品目", "品名": name, "規格": "", "数量": 1, "単位": "", "元単価": amount}
+
     if len(numbers) < 2:
         return None
 
@@ -168,9 +205,12 @@ def parse_line_to_item(line: str) -> dict | None:
     if len(values) >= 3:
         qty, price = values[-3], values[-2]
     else:
-        price = values[-2]
+        # 数字が2つだけの場合、単価欄が空欄で「数量・金額」の2列しか
+        # 無いケースが多い（例：「1　式　1000」）。数量を先頭、金額を
+        # 末尾として扱い、単価は金額÷数量で逆算する。
+        qty = values[-2]
         amount = values[-1]
-        qty = round(amount / price) if price else 1
+        price = amount / qty if qty else amount
 
     if price <= 0:
         return None
