@@ -35,7 +35,7 @@ CELL_GREETING = "B8"       # 固定の挨拶文
 # ── 発行元（自社）情報 ───────────────────────────────────────
 CELL_ISSUER_LICENSE = "I6"   # 許可番号など（結合 I6:N6、任意）
 CELL_ISSUER_NAME = "K8"      # 発行元 会社名（結合 K8:N8）
-CELL_ISSUER_ADDRESS = "K9"   # 発行元 住所（結合 K9:N9）
+CELL_ISSUER_ADDRESS = "I9"   # 発行元 住所（結合 I9:N9）
 CELL_ISSUER_TEL = "N10"      # 発行元 TEL
 CELL_ISSUER_FAX = "N11"      # 発行元 FAX
 CELL_ISSUER_REG_NO = "N12"   # インボイス登録番号

@@ -58,12 +58,16 @@ st.markdown(
 st.title("🧾 見積書自動生成ツール")
 st.caption("取引先から受け取ったPDF/Excelの見積書を読み取り、上乗せ率を反映して自社テンプレートに転記します")
 
-ITEM_COLUMNS = ["種別", "品名", "規格", "備考", "数量", "単位", "元単価"]
+ITEM_COLUMNS = ["no", "種別", "品名", "規格", "備考", "数量", "単位", "元単価"]
 
 if "items_df" not in st.session_state:
     st.session_state.items_df = pd.DataFrame(columns=ITEM_COLUMNS)
 if "last_uploaded_name" not in st.session_state:
     st.session_state.last_uploaded_name = None
+if "notes_text" not in st.session_state:
+    st.session_state.notes_text = ""
+if "pdf_nos" not in st.session_state:
+    st.session_state.pdf_nos = []
 
 uploaded = st.file_uploader("見積書をアップロード（PDF または Excel）", type=["pdf", "xlsx"])
 
@@ -71,27 +75,38 @@ if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name
     file_bytes = uploaded.read()
     items, method = [], ""
     if uploaded.name.lower().endswith(".pdf"):
-        with st.spinner("Claude Codeが見積書PDFを読み解いています…（数十秒かかります）"):
+        with st.spinner("Claude AIが見積書を解析しています…（通常1〜3分、APIが混雑時は最大10分かかります）"):
             try:
-                items, method = extract_items_from_pdf(file_bytes)
+                items, method, notes = extract_items_from_pdf(file_bytes)
+                st.session_state.notes_text = notes
             except ClaudeExtractionError as e:
                 st.error(f"PDFの解析に失敗しました: {e}")
     else:
         with st.spinner("Excelを解析しています…"):
             items = extract_items_from_excel(file_bytes)
             method = "Excel読み込み"
+            st.session_state.notes_text = ""
 
     if items:
         df = pd.DataFrame(items)
         for col in ITEM_COLUMNS:
             if col not in df.columns:
-                df[col] = "" if col != "種別" else "品目"
+                if col == "種別":
+                    df[col] = "品目"
+                elif col in ("数量", "元単価"):
+                    df[col] = 0
+                else:
+                    df[col] = ""
+        df["no"] = df["no"].fillna("").astype(str).str.strip()
         df["品名"] = df["品名"].fillna("")
         df["規格"] = df["規格"].fillna("")
         df["備考"] = df["備考"].fillna("")
         df["単位"] = df["単位"].fillna("")
         df["数量"] = pd.to_numeric(df["数量"], errors="coerce").fillna(0)
         df["元単価"] = pd.to_numeric(df["元単価"], errors="coerce").fillna(0)
+        # PDF由来の番号リストを保存（チェック機能用）
+        if uploaded.name.lower().endswith(".pdf"):
+            st.session_state.pdf_nos = [str(n) for n in df["no"].tolist() if str(n).strip()]
 
         # 値引行は表には出さず、別途「値引きを反映する」設定で扱う
         is_discount = (df["種別"] == "品目") & (df["品名"] == "値引")
@@ -100,9 +115,12 @@ if uploaded is not None and uploaded.name != st.session_state.last_uploaded_name
         df = df[~is_discount]
 
         st.session_state.items_df = df[ITEM_COLUMNS]
+        n_daikomi = (df["種別"] == "大項目").sum()
         n_sections = (df["種別"] == "工事区分").sum()
         n_breaks = (df["種別"] == "小計区切り").sum()
         note_parts = []
+        if n_daikomi:
+            note_parts.append(f"大項目 {n_daikomi} 件")
         if n_sections:
             note_parts.append(f"工事区分の見出し {n_sections} 件")
         if n_breaks:
@@ -126,18 +144,22 @@ st.caption(
     "できるだけ同じ区切り・見出しで出力されます）。"
 )
 
-bc1, bc2, bc3 = st.columns(3)
+bc1, bc2, bc3, bc4 = st.columns(4)
 with bc1:
     if st.button("＋ 品目行を追加"):
-        new_row = pd.DataFrame([{"種別": "品目", "品名": "", "規格": "", "備考": "", "数量": 1, "単位": "", "元単価": 0}])
+        new_row = pd.DataFrame([{"no": "", "種別": "品目", "品名": "", "規格": "", "備考": "", "数量": 1, "単位": "", "元単価": 0}])
         st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 with bc2:
-    if st.button("＋ 工事区分の見出しを追加"):
-        new_row = pd.DataFrame([{"種別": "工事区分", "品名": "", "規格": "", "備考": "", "数量": 0, "単位": "", "元単価": 0}])
+    if st.button("＋ 大項目を追加"):
+        new_row = pd.DataFrame([{"no": "", "種別": "大項目", "品名": "", "規格": "", "備考": "", "数量": 0, "単位": "", "元単価": 0}])
         st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 with bc3:
+    if st.button("＋ 工事区分の見出しを追加"):
+        new_row = pd.DataFrame([{"no": "", "種別": "工事区分", "品名": "", "規格": "", "備考": "", "数量": 0, "単位": "", "元単価": 0}])
+        st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
+with bc4:
     if st.button("＋ 小計区切りを追加"):
-        new_row = pd.DataFrame([{"種別": "小計区切り", "品名": "", "規格": "", "備考": "", "数量": 0, "単位": "", "元単価": 0}])
+        new_row = pd.DataFrame([{"no": "", "種別": "小計区切り", "品名": "", "規格": "", "備考": "", "数量": 0, "単位": "", "元単価": 0}])
         st.session_state.items_df = pd.concat([st.session_state.items_df, new_row], ignore_index=True)
 
 edited_df = st.data_editor(
@@ -145,7 +167,8 @@ edited_df = st.data_editor(
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "種別": st.column_config.SelectboxColumn("種別", options=["品目", "工事区分", "小計区切り"], width="small"),
+        "no": st.column_config.TextColumn("No.", width="small", help="元PDFの番号。変更すると出力Excelの番号もこの値になります"),
+        "種別": st.column_config.SelectboxColumn("種別", options=["品目", "大項目", "工事区分", "小計区切り"], width="small"),
         "品名": st.column_config.TextColumn("品名", width="large"),
         "規格": st.column_config.TextColumn("規格・仕様", width="medium"),
         "備考": st.column_config.TextColumn("備考", width="medium"),
@@ -171,7 +194,7 @@ with c_rate2:
         help="小計に対してこの税率で消費税を計算し、合計の直前に表示します",
     )
 
-dc1, dc2 = st.columns([1, 2])
+dc1, dc2, dc3 = st.columns([1, 2, 2])
 with dc1:
     apply_discount = st.checkbox(
         "値引きを反映する", value=False,
@@ -181,6 +204,11 @@ with dc2:
     discount_amount = st.number_input(
         "値引き額（円）", min_value=0.0, value=st.session_state.detected_discount, step=100.0,
         disabled=not apply_discount,
+    )
+with dc3:
+    skip_round10 = st.checkbox(
+        "1円単位で計算する（切り捨てなし）", value=False,
+        help="デフォルトでは上乗せ後単価の9円以下を切り捨て（10円単位）します。チェックすると1円単位のまま計算します。",
     )
 
 calc_df = edited_df.copy()
@@ -192,11 +220,16 @@ calc_df["単位"] = calc_df["単位"].fillna("") if "単位" in calc_df.columns 
 calc_df["数量"] = pd.to_numeric(calc_df["数量"], errors="coerce").fillna(0)
 calc_df["元単価"] = pd.to_numeric(calc_df["元単価"], errors="coerce").fillna(0)
 is_item = calc_df["種別"] == "品目"
-# 上乗せ後単価・金額は消費税を含まない（税別）。小数点以下は切り捨て。
-# 工事区分の見出し行は金額計算の対象外（0として扱う）。
 calc_df["上乗せ後単価"] = 0
 calc_df["金額"] = 0
-calc_df.loc[is_item, "上乗せ後単価"] = (calc_df.loc[is_item, "元単価"] * (1 + markup_rate / 100)).apply(math.floor)
+if skip_round10:
+    # 1円単位（切り捨てなし）
+    calc_df.loc[is_item, "上乗せ後単価"] = (calc_df.loc[is_item, "元単価"] * (1 + markup_rate / 100)).apply(math.floor)
+else:
+    # デフォルト: 10円以下切り捨て（9円以下切り捨て）
+    calc_df.loc[is_item, "上乗せ後単価"] = (calc_df.loc[is_item, "元単価"] * (1 + markup_rate / 100)).apply(
+        lambda x: math.floor(x / 10) * 10
+    )
 calc_df.loc[is_item, "金額"] = (calc_df.loc[is_item, "数量"] * calc_df.loc[is_item, "上乗せ後単価"]).apply(math.floor)
 calc_df = calc_df[
     (calc_df["品名"].astype(str).str.strip() != "") | (calc_df["種別"] == "小計区切り")
@@ -214,12 +247,27 @@ st.subheader("💰 上乗せ後の計算結果（税別）")
 if calc_df.empty:
     st.info("品目を入力すると、上乗せ後の金額がここに表示されます")
     subtotal = tax_amount = grand_total = 0
+    result_df = calc_df
 else:
-    st.dataframe(
-        calc_df[["種別", "品名", "規格", "備考", "数量", "単位", "元単価", "上乗せ後単価", "金額"]],
+    st.caption("「上乗せ後単価」列のセルをクリックすると手動で金額を修正できます。他の列は読み取り専用です。")
+    result_df = st.data_editor(
+        calc_df[["no", "種別", "品名", "規格", "備考", "数量", "単位", "元単価", "上乗せ後単価"]],
         use_container_width=True,
+        disabled=["no", "種別", "品名", "規格", "備考", "数量", "単位", "元単価"],
+        column_config={
+            "no": st.column_config.TextColumn("No.", width="small"),
+            "上乗せ後単価": st.column_config.NumberColumn("上乗せ後単価（手動修正可）", min_value=0, step=1),
+        },
+        key="calc_editor",
     )
-    subtotal = int(calc_df.loc[calc_df["種別"] == "品目", "金額"].sum())
+    # 編集後の上乗せ後単価から金額を再計算
+    result_df = result_df.copy()
+    result_df["金額"] = 0
+    is_item_r = result_df["種別"] == "品目"
+    result_df.loc[is_item_r, "金額"] = (
+        result_df.loc[is_item_r, "数量"] * result_df.loc[is_item_r, "上乗せ後単価"]
+    ).apply(math.floor)
+    subtotal = int(result_df.loc[result_df["種別"] == "品目", "金額"].sum())
     tax_amount = math.floor(subtotal * tax_rate / 100)
     grand_total = subtotal + tax_amount
     st.markdown(
@@ -233,11 +281,13 @@ else:
 
 st.divider()
 st.subheader("📄 宛先・発行日")
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
 with c1:
     client = st.text_input("宛先（会社名・氏名）")
 with c2:
-    issue_date = st.date_input("発行日", value=datetime.date.today())
+    quote_issue_date = st.date_input("見積書 発行日", value=datetime.date.today())
+with c3:
+    invoice_issue_date = st.date_input("請求書 発行日", value=datetime.date.today())
 
 st.subheader("🏢 発行元（自社）情報")
 
@@ -295,14 +345,83 @@ if st.button("💾 この発行元情報を保存"):
         st.rerun()
 
 st.divider()
+st.subheader("📝 備考・特記事項")
+st.caption("PDFから自動抽出された【別途見積】【見積条件】などの内容です。内容を確認・編集してください。Excel出力の末尾に追記されます。")
+notes_text = st.text_area(
+    "備考テキスト（Excel末尾に出力）",
+    value=st.session_state.notes_text,
+    height=160,
+    placeholder="例：【別途見積】\nセキュリティ工事\n\n【見積条件】\n・補修等は追加になります。",
+    label_visibility="collapsed",
+)
+st.session_state.notes_text = notes_text
+
+st.divider()
+
+show_section_subtotals = st.checkbox(
+    "グループごとの小計を表示する",
+    value=False,
+    help="工事区分（グループ）ごとに【小計】行を入れます。元の見積書に小計がこまめに入っている場合にチェックしてください。",
+)
+
+if st.session_state.pdf_nos:
+    with st.expander("🔍 元PDF番号チェック", expanded=False):
+        pdf_nos_list = st.session_state.pdf_nos
+        current_nos_list = [
+            str(row.get("no", "")).strip()
+            for _, row in edited_df.iterrows()
+            if str(row.get("no", "")).strip()
+        ]
+
+        def _sort_key(x):
+            return (0, int(x)) if x.isdigit() else (1, x)
+
+        pdf_set = set(pdf_nos_list)
+        current_set = set(current_nos_list)
+        missing = sorted(pdf_set - current_set, key=_sort_key)
+        added = sorted(current_set - pdf_set, key=_sort_key)
+
+        pdf_counts = {}
+        for n in pdf_nos_list:
+            pdf_counts[n] = pdf_counts.get(n, 0) + 1
+        current_counts = {}
+        for n in current_nos_list:
+            current_counts[n] = current_counts.get(n, 0) + 1
+        dup_pdf = {n: c for n, c in pdf_counts.items() if c > 1}
+        dup_current = {n: c for n, c in current_counts.items() if c > 1}
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            sorted_pdf = sorted(pdf_nos_list, key=_sort_key)
+            st.write(f"**元PDF番号** ({len(pdf_nos_list)}件): {', '.join(sorted_pdf)}")
+        with col_b:
+            sorted_cur = sorted(current_nos_list, key=_sort_key)
+            st.write(f"**現在の番号** ({len(current_nos_list)}件): {', '.join(sorted_cur)}")
+
+        if dup_pdf:
+            dup_str = "、".join(f"{n}（{c}回）" for n, c in sorted(dup_pdf.items(), key=lambda kv: _sort_key(kv[0])))
+            st.info(f"元PDFで番号が重複しています（PDF側の誤りの可能性）: {dup_str}")
+        if missing:
+            st.warning(f"元PDFにあるが現在にない番号: **{', '.join(missing)}**")
+        if added:
+            st.warning(f"元PDFにない番号が追加されています: **{', '.join(added)}**")
+        if dup_current:
+            dup_str = "、".join(f"{n}（{c}回）" for n, c in sorted(dup_current.items(), key=lambda kv: _sort_key(kv[0])))
+            st.warning(f"現在の番号に重複があります: {dup_str}")
+        if not missing and not added and not dup_current:
+            st.success("✓ 番号は元PDFと完全に一致しています")
 
 if calc_df.empty:
     st.button("📥 見積書・請求書をダウンロード（1冊にまとめて）", disabled=True, use_container_width=True)
 else:
-    items_payload = calc_df[["種別", "品名", "規格", "備考", "数量", "単位", "上乗せ後単価"]].to_dict("records")
+    items_payload = result_df[["no", "種別", "品名", "規格", "備考", "数量", "単位", "上乗せ後単価"]].to_dict("records")
     header_info = {
         "client": client,
-        "issue_date": issue_date if issue_date else None,
+        "issue_date": quote_issue_date if quote_issue_date else None,
+    }
+    invoice_header_info = {
+        "client": client,
+        "issue_date": invoice_issue_date if invoice_issue_date else None,
     }
     issuer_info = {
         "name": issuer_name,
@@ -316,6 +435,9 @@ else:
     combined_bytes = fill_combined_document(
         items_payload, header_info, issuer_info, tax_rate, TEMPLATE_PATH,
         bank_info=issuer_bank_info,
+        notes=notes_text,
+        show_section_subtotals=show_section_subtotals,
+        invoice_header_info=invoice_header_info,
     )
     st.download_button(
         "📥 見積書・請求書をダウンロード（1冊にまとめて）",
