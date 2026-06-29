@@ -223,8 +223,14 @@ def extract_items_from_pdf(file_bytes: bytes) -> tuple[list[dict], str, str]:
     """PDFをClaudeに直接読み込ませて品目データを抽出する。
 
     Claude Code CLI の Read ツールを使ってPDFを読み取る。
+    スキャンPDFは事前に向き（縦横・回転）を自動補正してから読ませる。
     APIが混雑している場合は時間がかかることがある（最大10分）。
     """
+    try:
+        from pdf_orient import ensure_upright_pdf
+        file_bytes = ensure_upright_pdf(file_bytes)
+    except Exception:
+        pass  # 向き補正に失敗しても元PDFで続行
     with tempfile.TemporaryDirectory(prefix="quote_pdf_") as tmp_dir:
         tmp_path = Path(tmp_dir) / "quote.pdf"
         tmp_path.write_bytes(file_bytes)
